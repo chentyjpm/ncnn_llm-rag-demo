@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NCNN LLM RAG Demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="glow one"></div>
+  <div class="glow two"></div>
+
+  <div class="app">
+    <header>
+      <div class="brand">
+        <h1>NCNN LLM RAG</h1>
+        <p>基于 ncnn_llm + 本地语料的轻量检索问答</p>
+      </div>
+      <div class="badges">
+        <span class="badge">模型：qwen3-0.6b</span>
+        <span class="badge">API：/v1/chat/completions</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="panel chat-panel">
+        <div id="log" class="log"></div>
+        <form id="form" class="composer">
+          <textarea id="input" placeholder="输入你的问题，看看本地资料能检索到什么..." required></textarea>
+          <button id="send" type="submit">发送</button>
+        </form>
+      </section>
+
+      <aside class="rag-panel">
+        <section class="panel card">
+          <h2>检索片段</h2>
+          <p class="status" id="ragStatus">索引状态：读取中...</p>
+          <div id="ragProcess" class="process"></div>
+          <div id="sources" class="sources"></div>
+        </section>
+
+        <section class="panel card controls">
+          <h2>生成设置</h2>
+          <div class="control-row">
+            <span>流式输出</span>
+            <input type="checkbox" id="stream" checked>
+          </div>
+          <div class="control-row">
+            <span>禁用思考标签</span>
+            <input type="checkbox" id="think">
+          </div>
+          <div class="control-row">
+            <span>启用 RAG</span>
+            <input type="checkbox" id="rag" checked>
+          </div>
+          <div class="control-row">
+            <span>Top-K</span>
+            <input type="number" id="ragTopK" min="1" max="10" value="4">
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

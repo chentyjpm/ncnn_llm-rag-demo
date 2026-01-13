@@ -1,0 +1,337 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;600;700&display=swap');
+
+:root {
+  --bg: #f5efe6;
+  --panel: #fff8f1;
+  --panel-2: #fef5e8;
+  --ink: #1b1f24;
+  --muted: #6b5f52;
+  --accent: #ef7c2f;
+  --accent-2: #0f766e;
+  --line: rgba(27, 31, 36, 0.12);
+  --shadow: 0 18px 50px rgba(37, 51, 63, 0.18);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "IBM Plex Sans", "Fira Sans", sans-serif;
+  color: var(--ink);
+  background: radial-gradient(circle at 10% 10%, rgba(239,124,47,0.16), transparent 35%),
+              radial-gradient(circle at 90% 5%, rgba(15,118,110,0.18), transparent 40%),
+              linear-gradient(120deg, #f6efe5 0%, #f3f9ff 50%, #fff2e6 100%);
+  min-height: 100vh;
+  padding: 28px 16px 40px;
+}
+
+.glow {
+  position: fixed;
+  inset: auto;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  filter: blur(48px);
+  opacity: 0.4;
+  z-index: -1;
+}
+
+.glow.one { background: #ffb86b; top: -40px; right: 8%; }
+.glow.two { background: #8dd8c7; bottom: -80px; left: 6%; }
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  animation: fadeIn 0.6s ease both;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.brand h1 {
+  margin: 0;
+  font-family: "Fraunces", "Space Grotesk", serif;
+  font-size: 30px;
+  letter-spacing: 0.3px;
+}
+
+.brand p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.badge {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(8px);
+}
+
+.main {
+  display: grid;
+  grid-template-columns: minmax(0, 2.1fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 600px;
+}
+
+.log {
+  flex: 1;
+  padding: 20px 20px 10px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.msg {
+  display: flex;
+  gap: 10px;
+  animation: rise 0.3s ease both;
+}
+
+.msg.user { justify-content: flex-end; }
+
+.bubble {
+  max-width: 85%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #fffdf9;
+  border: 1px solid rgba(0,0,0,0.06);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.user .bubble {
+  background: linear-gradient(135deg, rgba(239,124,47,0.18), rgba(239,124,47,0.05));
+  border: 1px solid rgba(239,124,47,0.3);
+}
+
+.assistant .bubble {
+  background: #fff;
+}
+
+.details-think {
+  margin-top: 10px;
+  background: #f2efe8;
+  border-radius: 10px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(27,31,36,0.2);
+}
+
+.details-think summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.details-think pre {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #3e352d;
+  white-space: pre-wrap;
+}
+
+.composer {
+  padding: 16px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  background: var(--panel-2);
+  border-radius: 0 0 18px 18px;
+}
+
+textarea {
+  min-height: 80px;
+  max-height: 180px;
+  resize: vertical;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-size: 15px;
+  font-family: inherit;
+}
+
+textarea:focus {
+  outline: none;
+  border-color: rgba(15,118,110,0.5);
+  box-shadow: 0 0 0 3px rgba(15,118,110,0.15);
+}
+
+button {
+  border: none;
+  border-radius: 12px;
+  padding: 12px 18px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #ef7c2f, #f0a54c);
+  color: #2b1203;
+  cursor: pointer;
+  box-shadow: 0 10px 18px rgba(239,124,47,0.2);
+  transition: transform 0.08s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+button:active { transform: translateY(1px); }
+
+.rag-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  padding: 16px;
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.status {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.process {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.process-item {
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(27, 31, 36, 0.04);
+  border-left: 3px solid rgba(239, 124, 47, 0.5);
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.process-item strong {
+  color: var(--ink);
+}
+
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.source {
+  border: 1px solid rgba(15,118,110,0.2);
+  background: rgba(15,118,110,0.08);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  animation: fadeInUp 0.3s ease both;
+}
+
+.source strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #0f766e;
+}
+
+.controls {
+  background: #fffdf7;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  font-size: 14px;
+  border-bottom: 1px dashed rgba(27,31,36,0.12);
+}
+
+.control-row:last-child { border-bottom: none; }
+
+.control-row input[type="checkbox"] {
+  accent-color: var(--accent-2);
+  transform: scale(1.1);
+}
+
+.control-row input[type="number"] {
+  width: 70px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  font-family: inherit;
+}
+
+@media (max-width: 900px) {
+  .main {
+    grid-template-columns: 1fr;
+  }
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .composer {
+    grid-template-columns: 1fr;
+  }
+  button { width: 100%; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
