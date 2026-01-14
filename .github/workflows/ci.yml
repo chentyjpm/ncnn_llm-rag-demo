@@ -31,6 +31,27 @@ jobs:
           ./scripts/fetch_ncnn_20260113.ps1 -OutDir deps/ncnn-prebuilt -Arch x64
           Write-Host "NCNN_PREFIX.txt:"; Get-Content deps/ncnn-prebuilt/NCNN_PREFIX.txt
           "NCNN_PREFIX=$(Get-Content deps/ncnn-prebuilt/NCNN_PREFIX.txt)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      
+      - name: Debug ncnn Vulkan flags (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $prefix = $env:NCNN_PREFIX
+          Write-Host "NCNN_PREFIX=$prefix"
+          $cfg = Join-Path $prefix "lib\\cmake\\ncnn\\ncnnConfig.cmake"
+          $gpuH = Join-Path $prefix "include\\ncnn\\gpu.h"
+          if (Test-Path $cfg) {
+            Write-Host "ncnnConfig.cmake: $cfg"
+            Select-String -Path $cfg -Pattern "set\\(NCNN_(VULKAN|SIMPLEVK|OPENMP|SHARED_LIB)" -SimpleMatch:$false | ForEach-Object { $_.Line } | Write-Host
+          } else {
+            Write-Host "ncnnConfig.cmake not found: $cfg"
+          }
+          if (Test-Path $gpuH) {
+            Write-Host "gpu.h: $gpuH"
+            Select-String -Path $gpuH -Pattern "create_gpu_instance|get_gpu_count|destroy_gpu_instance" | ForEach-Object { $_.Line } | Write-Host
+          } else {
+            Write-Host "gpu.h not found: $gpuH"
+          }
 
       - name: Configure (macOS/Linux)
         if: runner.os != 'Windows'
