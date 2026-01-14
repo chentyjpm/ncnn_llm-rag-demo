@@ -18,38 +18,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json cpp_httplib)
 
-set(NCNN_TARGET "")
-# Prefer explicit paths (works best for CI with prebuilt zips).
-if (NCNN_LIBRARY AND NCNN_INCLUDE_DIR)
-  get_filename_component(_ncnn_include_dir_abs "${NCNN_INCLUDE_DIR}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
-  get_filename_component(_ncnn_library_abs "${NCNN_LIBRARY}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
-  add_library(ncnn_manual UNKNOWN IMPORTED)
-  set_target_properties(ncnn_manual PROPERTIES
-    IMPORTED_LOCATION "${_ncnn_library_abs}"
-    INTERFACE_INCLUDE_DIRECTORIES "${_ncnn_include_dir_abs}"
-  )
-  set(NCNN_TARGET ncnn_manual)
+find_package(ncnn CONFIG REQUIRED)
+if (TARGET ncnn::ncnn)
+  set(NCNN_TARGET ncnn::ncnn)
+elseif (TARGET ncnn)
+  set(NCNN_TARGET ncnn)
 else()
-  find_package(ncnn QUIET)
-  if (TARGET ncnn::ncnn)
-    set(NCNN_TARGET ncnn::ncnn)
-  elseif (TARGET ncnn)
-    set(NCNN_TARGET ncnn)
-  endif()
-
-  if (NOT NCNN_TARGET)
-    find_path(NCNN_INCLUDE_DIR ncnn/net.h)
-    find_library(NCNN_LIBRARY ncnn)
-    if (NOT NCNN_INCLUDE_DIR OR NOT NCNN_LIBRARY)
-      message(FATAL_ERROR "ncnn not found. Set NCNN_INCLUDE_DIR and NCNN_LIBRARY, or install ncnn with CMake package files.")
-    endif()
-    add_library(ncnn UNKNOWN IMPORTED)
-    set_target_properties(ncnn PROPERTIES
-      IMPORTED_LOCATION "${NCNN_LIBRARY}"
-      INTERFACE_INCLUDE_DIRECTORIES "${NCNN_INCLUDE_DIR}"
-    )
-    set(NCNN_TARGET ncnn)
-  endif()
+  message(FATAL_ERROR "ncnn package found but no target (expected ncnn::ncnn or ncnn).")
 endif()
 
 find_package(Threads REQUIRED)
@@ -88,44 +63,24 @@ if (WIN32)
   target_compile_definitions(ncnn_llm_rag_app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
-# Link OpenMP runtime after ncnn (important when ncnn is a static archive).
-if (DEFINED NCNN_OPENMP_LIBRARY AND EXISTS "${NCNN_OPENMP_LIBRARY}")
-  if (APPLE AND "${NCNN_OPENMP_LIBRARY}" MATCHES "\\.framework/")
-    # Prefer framework-style linking on macOS.
-    # NCNN_OPENMP_LIBRARY is expected like: .../openmp.framework/Versions/A/openmp
-    get_filename_component(_openmp_bin_dir "${NCNN_OPENMP_LIBRARY}" DIRECTORY)            # .../Versions/A
-    get_filename_component(_openmp_versions_dir "${_openmp_bin_dir}" DIRECTORY)          # .../Versions
-    get_filename_component(_openmp_framework_dir "${_openmp_versions_dir}" DIRECTORY)    # .../openmp.framework
-    get_filename_component(_openmp_frameworks_root "${_openmp_framework_dir}" DIRECTORY) # parent dir
-    target_link_options(ncnn_llm_rag_app PRIVATE "-F${_openmp_frameworks_root}")
-    target_link_libraries(ncnn_llm_rag_app PRIVATE "-framework" "openmp")
-  else()
-    target_link_libraries(ncnn_llm_rag_app PRIVATE "${NCNN_OPENMP_LIBRARY}")
+# Workaround for some ncnn CMake packages that export include dir as ".../include/ncnn".
+# Our code uses "<ncnn/*.h>", which requires adding the parent include dir as well.
+get_target_property(_ncnn_iface_includes ${NCNN_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
+if (_ncnn_iface_includes)
+  set(_ncnn_extra_includes "")
+  foreach(_inc IN LISTS _ncnn_iface_includes)
+    if (_inc MATCHES "(/|\\\\)include(/|\\\\)ncnn$")
+      get_filename_component(_parent "${_inc}" DIRECTORY)
+      list(APPEND _ncnn_extra_includes "${_parent}")
+    endif()
+  endforeach()
+  if (_ncnn_extra_includes)
+    list(REMOVE_DUPLICATES _ncnn_extra_includes)
+    target_include_directories(ncnn_llm_rag_app PRIVATE ${_ncnn_extra_includes})
   endif()
 endif()
 
-# Detect whether the linked ncnn provides Vulkan GPU instance API, to avoid link failures on non-vulkan builds.
-# (On Windows, backslashes in paths can break CMake's try_compile unless normalized.)
-set(_ncnn_has_vulkan_api 0)
-if (NCNN_INCLUDE_DIR AND NCNN_LIBRARY)
-  file(TO_CMAKE_PATH "${NCNN_INCLUDE_DIR}" _ncnn_inc_cmake)
-  file(TO_CMAKE_PATH "${NCNN_LIBRARY}" _ncnn_lib_cmake)
-
-  file(WRITE ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu.cpp [=[
-#include <ncnn/gpu.h>
-int main(){ return ncnn::get_gpu_count(); }
-]=])
-  try_compile(_ncnn_gpu_api_links
-    ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu_build
-    ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu.cpp
-    LINK_LIBRARIES "${_ncnn_lib_cmake}"
-    CMAKE_FLAGS "-DCMAKE_CXX_FLAGS=-I${_ncnn_inc_cmake}"
-  )
-  if (_ncnn_gpu_api_links)
-    set(_ncnn_has_vulkan_api 1)
-  endif()
-endif()
-
-if (_ncnn_has_vulkan_api)
+# If the package exports NCNN_VULKAN, use it to gate optional Vulkan calls in our code.
+if (DEFINED NCNN_VULKAN AND NCNN_VULKAN)
   target_compile_definitions(ncnn_llm_rag_app PRIVATE NCNN_RAG_HAS_VULKAN_API=1)
 endif()

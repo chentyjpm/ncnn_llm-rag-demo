@@ -52,7 +52,7 @@ if ($cfg) {
   Write-Host "NCNN install prefix (arch): $prefixCmake"
   Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefixCmake -Encoding ascii
 } else {
-  Write-Warning "ncnnConfig.cmake not found under arch root: $archRoot"
+  throw "ncnnConfig.cmake not found under arch root: $archRoot. This project uses find_package(ncnn CONFIG REQUIRED)."
 }
 
 $mat = $null
@@ -97,6 +97,20 @@ $libPath = Resolve-Path $lib.FullName | Select-Object -ExpandProperty Path
 $libPathCmake = $libPath -replace '\\','/'
 Write-Host "NCNN library: $libPathCmake"
 Set-Content -Path (Join-Path $OutDir "NCNN_LIBRARY.txt") -Value $libPathCmake -Encoding ascii
+
+$libDir = Split-Path $lib.FullName -Parent
+$extraLibs = @()
+if (Test-Path $libDir) {
+  $extraLibs = Get-ChildItem -Path $libDir -Filter "*.lib" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne "ncnn.lib" } |
+    Sort-Object -Property Name
+}
+if ($extraLibs -and $extraLibs.Count -gt 0) {
+  $extraPaths = $extraLibs | ForEach-Object { (Resolve-Path $_.FullName | Select-Object -ExpandProperty Path) -replace '\\','/' }
+  $extraJoined = ($extraPaths -join ";")
+  Write-Host "NCNN extra libs: $extraJoined"
+  Set-Content -Path (Join-Path $OutDir "NCNN_EXTRA_LIBRARIES.txt") -Value $extraJoined -Encoding ascii
+}
 
 $openmp = Get-ChildItem -Path $ExtractDir -Recurse -Filter "openmp.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($openmp) {

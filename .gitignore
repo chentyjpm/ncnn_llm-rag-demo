@@ -1,7 +1,5 @@
 assets/
 build/
-build-localtest/
-build-localtest2/
 deps/
 data/
 .DS_Store

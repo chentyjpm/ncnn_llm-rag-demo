@@ -90,7 +90,9 @@ fi
 
 cfg="$(find "$OUT_DIR/extracted" -name 'ncnnConfig.cmake' -print -quit || true)"
 if [[ -z "$cfg" ]]; then
-  echo "WARN: ncnnConfig.cmake not found under $OUT_DIR/extracted" >&2
+  echo "ERROR: ncnnConfig.cmake not found under $OUT_DIR/extracted" >&2
+  echo "This project uses find_package(ncnn CONFIG REQUIRED); please use a prebuilt that ships CMake package files." >&2
+  exit 1
 fi
 
 if [[ -n "$cfg" ]]; then
