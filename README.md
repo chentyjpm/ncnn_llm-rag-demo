@@ -4,7 +4,7 @@
 [![ci-macos](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-macos.yml)
 [![ci-windows](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-windows.yml)
 
-![demo](img/demo.png)
+
 
 基于 **ncnn** 的本地离线 LLM + RAG 检索增强问答 Demo（单个可执行程序 + 内置 Web UI），用于验证/调试 `ncnn_llm` 在文档检索场景下的集成效果。
 
@@ -16,6 +16,7 @@
 
 - 提供一个可离线运行的 RAG Web 应用：上传 PDF/TXT → 建库 → 检索 → 结合 LLM 回答
 
+![demo](img/demo.png)
 
 ## 当前实现
 
