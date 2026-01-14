@@ -72,12 +72,25 @@ download_and_extract() {
 }
 
 if [[ "$OS" == "macos" ]]; then
-  # Prefer Vulkan-enabled build if available (it provides ncnn::create_gpu_instance/get_gpu_count).
+  # Prefer Vulkan-enabled build if available, but only when it ships a Vulkan loader.
+  # GitHub macOS runners typically do not have Vulkan/MoltenVK installed by default, so
+  # a Vulkan-enabled ncnn that expects vkGetInstanceProcAddr at link time will fail.
   url_vulkan="https://github.com/Tencent/ncnn/releases/download/${TAG}/ncnn-${TAG}-macos-vulkan.zip"
   url_plain="https://github.com/Tencent/ncnn/releases/download/${TAG}/ncnn-${TAG}-macos.zip"
+
+  picked_plain=0
   if curl "${curl_args[@]}" -I "$url_vulkan" >/dev/null 2>&1; then
     download_and_extract "$url_vulkan" "$OUT_DIR/ncnn-${TAG}-${OS}-vulkan.zip"
+    vulkan_loader="$(find "$OUT_DIR/extracted" -type f \( -name 'libvulkan*.dylib' -o -path '*/vulkan.framework/Versions/*/vulkan' -o -path '*/vulkan.framework/vulkan' \) -print -quit 2>/dev/null || true)"
+    if [[ -z "$vulkan_loader" ]]; then
+      echo "WARN: macos-vulkan prebuilt found but no Vulkan loader shipped; falling back to plain macos prebuilt." >&2
+      picked_plain=1
+    fi
   else
+    picked_plain=1
+  fi
+
+  if [[ "$picked_plain" == "1" ]]; then
     download_and_extract "$url_plain" "$OUT_DIR/ncnn-${TAG}-${OS}.zip"
   fi
 elif [[ "$OS" == "linux" ]]; then
