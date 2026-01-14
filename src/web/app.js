@@ -10,6 +10,7 @@ const ragTopK = document.getElementById('ragTopK');
 const ragStatus = document.getElementById('ragStatus');
 const ragProcess = document.getElementById('ragProcess');
 const sources = document.getElementById('sources');
+const docsList = document.getElementById('docsList');
 const uploadForm = document.getElementById('uploadForm');
 const uploadFile = document.getElementById('uploadFile');
 const uploadBtn = document.getElementById('uploadBtn');
@@ -103,8 +104,19 @@ function renderSources(rag) {
   rag.chunks.forEach((chunk, idx) => {
     const div = document.createElement('div');
     div.className = 'source';
-    const title = document.createElement('strong');
-    title.textContent = `[${idx + 1}] ${chunk.source}`;
+    const title = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = `[${idx + 1}] ${chunk.source}`;
+    title.appendChild(strong);
+    if (chunk.url) {
+      const link = document.createElement('a');
+      link.href = chunk.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.marginLeft = '8px';
+      link.textContent = '打开原文';
+      title.appendChild(link);
+    }
     const body = document.createElement('div');
     body.textContent = chunk.text;
     div.appendChild(title);
@@ -214,9 +226,77 @@ async function fetchRagInfo() {
     const enabled = info.enabled ? '已启用' : '未启用';
     const tool = mcpReady ? 'MCP: rag_search' : 'MCP: 不可用';
     const dim = info.embed_dim ? `dim ${info.embed_dim}` : 'dim ?';
-    setStatus(`索引状态：${enabled} · 文档 ${info.doc_count} · 片段 ${info.chunk_count} · ${dim} · ${tool}`);
+    let extra = '';
+    if (info.ready === false && info.error) extra = ` · 错误：${info.error}`;
+    setStatus(`索引状态：${enabled} · 文档 ${info.doc_count} · 片段 ${info.chunk_count} · ${dim} · ${tool}${extra}`);
   } catch (err) {
     setStatus('索引状态：无法读取');
+  }
+}
+
+function renderDocsList(docs) {
+  if (!docsList) return;
+  docsList.innerHTML = '';
+  if (!docs || docs.length === 0) {
+    docsList.innerHTML = '<div class="source"><strong>暂无文档</strong>请先上传 txt/pdf。</div>';
+    return;
+  }
+  docs.forEach((d) => {
+    const div = document.createElement('div');
+    div.className = 'source';
+    const title = document.createElement('div');
+    const strong = document.createElement('strong');
+    strong.textContent = `${d.filename || 'unknown'} · ${d.chunk_count || 0} 片段`;
+    title.appendChild(strong);
+    if (d.url) {
+      const link = document.createElement('a');
+      link.href = d.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.marginLeft = '8px';
+      link.textContent = '查看';
+      title.appendChild(link);
+    }
+    if (d.id) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '删除';
+      del.style.marginLeft = '8px';
+      del.addEventListener('click', async () => {
+        const ok = confirm(`确定删除文档？\\n${d.filename || ''}\\n(id=${d.id})`);
+        if (!ok) return;
+        try {
+          const resp = await fetch(`/rag/doc/${encodeURIComponent(d.id)}`, { method: 'DELETE' });
+          if (!resp.ok) {
+            const msg = await resp.text();
+            throw new Error(msg);
+          }
+          await fetchRagInfo();
+          await fetchDocsList();
+        } catch (err) {
+          alert(`删除失败：${err.message}`);
+        }
+      });
+      title.appendChild(del);
+    }
+    div.appendChild(title);
+    docsList.appendChild(div);
+  });
+}
+
+async function fetchDocsList() {
+  if (!docsList) return;
+  try {
+    const resp = await fetch('/rag/docs?limit=200');
+    if (!resp.ok) {
+      const msg = await resp.text();
+      docsList.innerHTML = `<div class="source"><strong>读取失败</strong>${escapeHtml(msg)}</div>`;
+      return;
+    }
+    const data = await resp.json();
+    renderDocsList(data.docs || []);
+  } catch (err) {
+    docsList.innerHTML = `<div class="source"><strong>读取失败</strong>${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -239,7 +319,14 @@ async function callMcpTool(name, args) {
   });
   if (!resp.ok) {
     const msg = await resp.text();
-    throw new Error(`MCP ${resp.status}: ${msg}`);
+    try {
+      const j = JSON.parse(msg);
+      const err = new Error(j?.error?.message ? `MCP ${resp.status}: ${j.error.message}` : `MCP ${resp.status}: ${msg}`);
+      if (Array.isArray(j?.trace)) err.trace = j.trace;
+      throw err;
+    } catch (_) {
+      throw new Error(`MCP ${resp.status}: ${msg}`);
+    }
   }
   const data = await resp.json();
   return data.result;
@@ -314,6 +401,9 @@ async function sendMessage(content) {
         renderSources({ enabled: true, chunks: ragChunks });
       } catch (err) {
         logProcess(`检索失败：${err.message}`, true);
+        if (Array.isArray(err.trace)) {
+          err.trace.forEach((line) => logProcess(`检索错误步骤：${line}`));
+        }
       }
     }
   }
@@ -420,6 +510,7 @@ uploadForm.addEventListener('submit', async (e) => {
       logProcess(`索引完成：${data.doc.filename} · ${data.doc.chunks} 片段`, true);
     }
     await fetchRagInfo();
+    await fetchDocsList();
   } catch (err) {
     logProcess(`上传失败：${err.message}`, true);
   } finally {
@@ -428,5 +519,8 @@ uploadForm.addEventListener('submit', async (e) => {
   }
 });
 
-fetchMcpTools().then(fetchRagInfo);
+fetchMcpTools().then(async () => {
+  await fetchRagInfo();
+  await fetchDocsList();
+});
 renderSources({ enabled: false });

@@ -263,6 +263,92 @@ bool RagVectorDb::add_document(const std::string& filename,
     return true;
 }
 
+bool RagVectorDb::delete_doc(size_t doc_id, std::string* err) {
+    if (!db_) {
+        if (err) *err = "database not initialized";
+        return false;
+    }
+
+    if (!exec("BEGIN TRANSACTION;", err)) return false;
+
+    {
+        const char* sql = "SELECT id FROM docs WHERE id = ?;";
+        Stmt stmt;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt.stmt, nullptr) != SQLITE_OK) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+        sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
+        if (sqlite3_step(stmt.stmt) != SQLITE_ROW) {
+            if (err) *err = "document not found";
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+    }
+
+    {
+        const char* sql = "DELETE FROM vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?);";
+        Stmt stmt;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt.stmt, nullptr) != SQLITE_OK) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+        sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
+        if (sqlite3_step(stmt.stmt) != SQLITE_DONE) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+    }
+
+    {
+        const char* sql = "DELETE FROM chunks WHERE doc_id = ?;";
+        Stmt stmt;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt.stmt, nullptr) != SQLITE_OK) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+        sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
+        if (sqlite3_step(stmt.stmt) != SQLITE_DONE) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+    }
+
+    {
+        const char* sql = "DELETE FROM docs WHERE id = ?;";
+        Stmt stmt;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt.stmt, nullptr) != SQLITE_OK) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+        sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
+        if (sqlite3_step(stmt.stmt) != SQLITE_DONE) {
+            if (err) *err = sqlite3_errmsg(db_);
+            exec("ROLLBACK;", nullptr);
+            return false;
+        }
+    }
+
+    std::string local_err;
+    if (!load_counts(&local_err)) {
+        if (err) *err = local_err;
+        exec("ROLLBACK;", nullptr);
+        return false;
+    }
+
+    if (!exec("COMMIT;", err)) {
+        exec("ROLLBACK;", nullptr);
+        return false;
+    }
+    return true;
+}
+
 std::vector<RagSearchHit> RagVectorDb::search(const std::vector<float>& query_vec, size_t top_k) const {
     std::vector<RagSearchHit> out;
     if (!db_ || query_vec.empty() || top_k == 0) return out;
@@ -328,6 +414,17 @@ std::string RagVectorDb::expand_neighbors(size_t doc_id, int center_chunk_index,
     int start = center_chunk_index - neighbor_chunks;
     if (start < 0) start = 0;
     int end = center_chunk_index + neighbor_chunks;
+    return expand_range(doc_id, start, end, center_chunk_index);
+}
+
+std::string RagVectorDb::expand_range(size_t doc_id,
+                                     int start_chunk_index,
+                                     int end_chunk_index,
+                                     int center_chunk_index) const {
+    if (!db_) return {};
+    if (center_chunk_index < 0) return {};
+    if (start_chunk_index < 0) start_chunk_index = 0;
+    if (end_chunk_index < start_chunk_index) return {};
 
     const char* sql =
         "SELECT chunk_index, text "
@@ -339,8 +436,8 @@ std::string RagVectorDb::expand_neighbors(size_t doc_id, int center_chunk_index,
         return {};
     }
     sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
-    sqlite3_bind_int(stmt.stmt, 2, start);
-    sqlite3_bind_int(stmt.stmt, 3, end);
+    sqlite3_bind_int(stmt.stmt, 2, start_chunk_index);
+    sqlite3_bind_int(stmt.stmt, 3, end_chunk_index);
 
     std::string out;
     bool first = true;
@@ -356,6 +453,101 @@ std::string RagVectorDb::expand_neighbors(size_t doc_id, int center_chunk_index,
             out += "(matched chunk " + std::to_string(idx) + ")\n";
         }
         out += reinterpret_cast<const char*>(text);
+    }
+    return out;
+}
+
+bool RagVectorDb::get_document_chunks(size_t doc_id,
+                                      std::string* out_filename,
+                                      std::vector<RagSearchHit>* out_chunks,
+                                      std::string* err) const {
+    if (!db_) {
+        if (err) *err = "database not initialized";
+        return false;
+    }
+    if (!out_filename || !out_chunks) {
+        if (err) *err = "invalid output pointers";
+        return false;
+    }
+
+    out_filename->clear();
+    out_chunks->clear();
+
+    {
+        const char* sql = "SELECT filename FROM docs WHERE id = ?;";
+        Stmt stmt;
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt.stmt, nullptr) != SQLITE_OK) {
+            if (err) *err = sqlite3_errmsg(db_);
+            return false;
+        }
+        sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
+        int rc = sqlite3_step(stmt.stmt);
+        if (rc != SQLITE_ROW) {
+            if (err) *err = "document not found";
+            return false;
+        }
+        const unsigned char* filename = sqlite3_column_text(stmt.stmt, 0);
+        if (filename) *out_filename = reinterpret_cast<const char*>(filename);
+    }
+
+    const char* chunk_sql =
+        "SELECT chunk_index, source, text "
+        "FROM chunks "
+        "WHERE doc_id = ? "
+        "ORDER BY chunk_index ASC;";
+    Stmt chunk_stmt;
+    if (sqlite3_prepare_v2(db_, chunk_sql, -1, &chunk_stmt.stmt, nullptr) != SQLITE_OK) {
+        if (err) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_int64(chunk_stmt.stmt, 1, static_cast<sqlite3_int64>(doc_id));
+    while (sqlite3_step(chunk_stmt.stmt) == SQLITE_ROW) {
+        int chunk_index = sqlite3_column_int(chunk_stmt.stmt, 0);
+        const unsigned char* source = sqlite3_column_text(chunk_stmt.stmt, 1);
+        const unsigned char* text = sqlite3_column_text(chunk_stmt.stmt, 2);
+
+        RagSearchHit hit;
+        hit.doc_id = doc_id;
+        hit.chunk_index = chunk_index;
+        hit.source = source ? reinterpret_cast<const char*>(source) : "";
+        hit.text = text ? reinterpret_cast<const char*>(text) : "";
+        hit.score = 0.0;
+        out_chunks->push_back(std::move(hit));
+    }
+
+    return true;
+}
+
+std::vector<RagDocInfo> RagVectorDb::list_docs(size_t limit, size_t offset) const {
+    std::vector<RagDocInfo> out;
+    if (!db_ || limit == 0) return out;
+
+    const char* sql =
+        "SELECT id, filename, mime, added_at, chunk_count "
+        "FROM docs "
+        "ORDER BY id DESC "
+        "LIMIT ? OFFSET ?;";
+    Stmt stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt.stmt, nullptr) != SQLITE_OK) {
+        return out;
+    }
+    sqlite3_bind_int64(stmt.stmt, 1, static_cast<sqlite3_int64>(limit));
+    sqlite3_bind_int64(stmt.stmt, 2, static_cast<sqlite3_int64>(offset));
+
+    while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
+        sqlite3_int64 id = sqlite3_column_int64(stmt.stmt, 0);
+        const unsigned char* filename = sqlite3_column_text(stmt.stmt, 1);
+        const unsigned char* mime = sqlite3_column_text(stmt.stmt, 2);
+        sqlite3_int64 added_at = sqlite3_column_int64(stmt.stmt, 3);
+        sqlite3_int64 chunk_count = sqlite3_column_int64(stmt.stmt, 4);
+
+        RagDocInfo info;
+        info.id = static_cast<size_t>(id);
+        info.filename = filename ? reinterpret_cast<const char*>(filename) : "";
+        info.mime = mime ? reinterpret_cast<const char*>(mime) : "";
+        info.added_at = static_cast<int64_t>(added_at);
+        info.chunk_count = chunk_count > 0 ? static_cast<size_t>(chunk_count) : 0;
+        out.push_back(std::move(info));
     }
     return out;
 }

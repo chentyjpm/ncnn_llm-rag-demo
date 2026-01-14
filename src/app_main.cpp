@@ -10,6 +10,8 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <ncnn/gpu.h>
+
 #include <cstdlib>
 #include <algorithm>
 #include <chrono>
@@ -44,8 +46,205 @@ std::string truncate_for_log(const std::string& s, size_t max_len) {
     return cleaned.substr(0, max_len) + "...(" + std::to_string(cleaned.size()) + " bytes)";
 }
 
+std::string sanitize_utf8_strict(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    auto is_cont = [&](unsigned char c) { return (c & 0xC0) == 0x80; };
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+            ++i;
+            continue;
+        }
+
+        // 2-byte: U+0080..U+07FF
+        if (c >= 0xC2 && c <= 0xDF) {
+            if (i + 1 < s.size() && is_cont(static_cast<unsigned char>(s[i + 1]))) {
+                out.append(s, i, 2);
+                i += 2;
+                continue;
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+
+        // 3-byte: U+0800..U+FFFF (excluding surrogates)
+        if (c == 0xE0) {
+            if (i + 2 < s.size()) {
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+                if (c1 >= 0xA0 && c1 <= 0xBF && is_cont(c2)) {
+                    out.append(s, i, 3);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+        if (c >= 0xE1 && c <= 0xEC) {
+            if (i + 2 < s.size() && is_cont(static_cast<unsigned char>(s[i + 1])) &&
+                is_cont(static_cast<unsigned char>(s[i + 2]))) {
+                out.append(s, i, 3);
+                i += 3;
+                continue;
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+        if (c == 0xED) {
+            if (i + 2 < s.size()) {
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+                if (c1 >= 0x80 && c1 <= 0x9F && is_cont(c2)) {
+                    out.append(s, i, 3);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+        if (c >= 0xEE && c <= 0xEF) {
+            if (i + 2 < s.size() && is_cont(static_cast<unsigned char>(s[i + 1])) &&
+                is_cont(static_cast<unsigned char>(s[i + 2]))) {
+                out.append(s, i, 3);
+                i += 3;
+                continue;
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+
+        // 4-byte: U+10000..U+10FFFF
+        if (c == 0xF0) {
+            if (i + 3 < s.size()) {
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+                unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+                if (c1 >= 0x90 && c1 <= 0xBF && is_cont(c2) && is_cont(c3)) {
+                    out.append(s, i, 4);
+                    i += 4;
+                    continue;
+                }
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+        if (c >= 0xF1 && c <= 0xF3) {
+            if (i + 3 < s.size() && is_cont(static_cast<unsigned char>(s[i + 1])) &&
+                is_cont(static_cast<unsigned char>(s[i + 2])) &&
+                is_cont(static_cast<unsigned char>(s[i + 3]))) {
+                out.append(s, i, 4);
+                i += 4;
+                continue;
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+        if (c == 0xF4) {
+            if (i + 3 < s.size()) {
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+                unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+                if (c1 >= 0x80 && c1 <= 0x8F && is_cont(c2) && is_cont(c3)) {
+                    out.append(s, i, 4);
+                    i += 4;
+                    continue;
+                }
+            }
+            out.push_back('?');
+            ++i;
+            continue;
+        }
+
+        out.push_back('?');
+        ++i;
+    }
+    return out;
+}
+
 void log_event(const std::string& tag, const std::string& msg) {
     std::cerr << "[" << now_ms_epoch() << "] " << tag << " " << msg << "\n";
+}
+
+std::string dump_json_safe(const json& j) {
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+size_t utf8_safe_cut_pos(const std::string& s, size_t pos) {
+    if (pos >= s.size()) return s.size();
+    while (pos > 0) {
+        unsigned char c = static_cast<unsigned char>(s[pos]);
+        if ((c & 0xC0) != 0x80) break; // not a continuation byte
+        --pos;
+    }
+    return pos;
+}
+
+std::vector<std::string> split_prompt_chunks(const std::string& prompt, size_t chunk_bytes) {
+    std::vector<std::string> out;
+    if (chunk_bytes == 0 || prompt.size() <= chunk_bytes) {
+        out.push_back(prompt);
+        return out;
+    }
+
+    size_t pos = 0;
+    while (pos < prompt.size()) {
+        size_t remaining = prompt.size() - pos;
+        size_t want = std::min(chunk_bytes, remaining);
+        size_t end = pos + want;
+        if (end < prompt.size()) {
+            size_t best = std::string::npos;
+            size_t window_start = (end > 256) ? (end - 256) : pos;
+            for (size_t i = end; i > window_start; --i) {
+                char c = prompt[i - 1];
+                if (c == '\n' || c == ' ' || c == '\t') {
+                    best = i;
+                    break;
+                }
+            }
+            if (best != std::string::npos && best > pos) {
+                end = best;
+            }
+            end = utf8_safe_cut_pos(prompt, end);
+            if (end <= pos) {
+                end = utf8_safe_cut_pos(prompt, pos + want);
+                if (end <= pos) end = std::min(pos + want, prompt.size());
+            }
+        }
+        out.push_back(prompt.substr(pos, end - pos));
+        pos = end;
+    }
+    return out;
+}
+
+std::shared_ptr<ncnn_llm_gpt_ctx> prefill_chunked(const ncnn_llm_gpt& model,
+                                                  const std::string& prompt,
+                                                  size_t chunk_bytes,
+                                                  const std::string& req_id) {
+    auto chunks = split_prompt_chunks(prompt, chunk_bytes);
+    if (chunks.empty()) return nullptr;
+    if (chunks.size() == 1) return model.prefill(prompt);
+
+    std::shared_ptr<ncnn_llm_gpt_ctx> ctx;
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        log_event("chat.prefill.chunk", "id=" + req_id +
+                                        " idx=" + std::to_string(i) +
+                                        " bytes=" + std::to_string(chunks[i].size()) +
+                                        " total_chunks=" + std::to_string(chunks.size()));
+        if (ctx) ctx = model.prefill(chunks[i], ctx);
+        else ctx = model.prefill(chunks[i]);
+    }
+    return ctx;
 }
 
 std::string summarize_messages(const std::vector<Message>& messages, const std::string& last_user) {
@@ -96,6 +295,25 @@ std::string summarize_hits(const std::vector<RagSearchHit>& hits, size_t max_ite
     return oss.str();
 }
 
+std::string doc_chunk_url(size_t doc_id, int chunk_index) {
+    return "/rag/doc/" + std::to_string(doc_id) + "#chunk-" + std::to_string(chunk_index);
+}
+
+std::string escape_html(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
 struct AppOptions {
     std::string model_path = "assets/qwen3_0.6b";
     std::string web_root = "src/web";
@@ -111,6 +329,7 @@ struct AppOptions {
     size_t rag_top_k = 10;
     int rag_neighbor_chunks = 1;
     size_t rag_chunk_max_chars = 1800;
+    size_t llm_prefill_chunk_bytes = 2048;
     bool save_pdf_txt = true;
 };
 
@@ -128,6 +347,7 @@ void print_usage(const char* argv0) {
               << "  --rag-top-k N     Retrieved chunks (default: 10)\n"
               << "  --rag-neighbors N Include neighbor chunks around each hit (default: 1)\n"
               << "  --rag-chunk-max N Max chars per returned chunk after expansion (default: 1800)\n"
+              << "  --prefill-chunk-bytes N Chunk prompt for prefill to reduce memory (default: 2048)\n"
               << "  --no-rag          Disable retrieval\n"
               << "  --no-pdf-txt      Disable exporting extracted PDF text\n"
               << "  --vulkan          Enable Vulkan compute\n"
@@ -165,6 +385,10 @@ AppOptions parse_options(int argc, char** argv) {
             if (auto v = parse_int(argv[++i])) opt.rag_neighbor_chunks = *v;
         } else if (arg == "--rag-chunk-max" && i + 1 < argc) {
             if (auto v = parse_int(argv[++i])) opt.rag_chunk_max_chars = static_cast<size_t>(*v);
+        } else if (arg == "--prefill-chunk-bytes" && i + 1 < argc) {
+            if (auto v = parse_int(argv[++i])) {
+                if (*v > 0) opt.llm_prefill_chunk_bytes = static_cast<size_t>(*v);
+            }
         } else if (arg == "--no-rag") {
             opt.rag_enabled = false;
         } else if (arg == "--no-pdf-txt") {
@@ -189,8 +413,8 @@ std::string build_rag_context(const std::vector<RagSearchHit>& hits) {
     if (hits.empty()) return {};
     std::string ctx;
     for (size_t i = 0; i < hits.size(); ++i) {
-        ctx += "[" + std::to_string(i + 1) + "] Source: " + hits[i].source + "\n";
-        ctx += hits[i].text + "\n\n";
+        ctx += "[" + std::to_string(i + 1) + "] Source: " + sanitize_utf8_strict(hits[i].source) + "\n";
+        ctx += sanitize_utf8_strict(hits[i].text) + "\n\n";
     }
     return ctx;
 }
@@ -200,11 +424,67 @@ void expand_hits_with_neighbors(const RagVectorDb& rag,
                                 int neighbor_chunks,
                                 size_t max_chunk_chars) {
     if (neighbor_chunks <= 0 || hits.empty()) return;
-    for (auto& hit : hits) {
-        std::string expanded = rag.expand_neighbors(hit.doc_id, hit.chunk_index, neighbor_chunks);
-        if (!expanded.empty()) {
-            hit.text = shorten_text(expanded, max_chunk_chars);
+
+    struct RangeHit {
+        size_t doc_id = 0;
+        int start = 0;
+        int end = 0;
+        double best_score = 0.0;
+        int center_chunk_index = 0;
+        std::string source;
+    };
+
+    std::vector<RangeHit> ranges;
+    ranges.reserve(hits.size());
+    for (const auto& hit : hits) {
+        int start = hit.chunk_index - neighbor_chunks;
+        if (start < 0) start = 0;
+        int end = hit.chunk_index + neighbor_chunks;
+        RangeHit r;
+        r.doc_id = hit.doc_id;
+        r.start = start;
+        r.end = end;
+        r.best_score = hit.score;
+        r.center_chunk_index = hit.chunk_index;
+        r.source = hit.source;
+        ranges.push_back(std::move(r));
+    }
+
+    std::sort(ranges.begin(), ranges.end(), [](const RangeHit& a, const RangeHit& b) {
+        if (a.doc_id != b.doc_id) return a.doc_id < b.doc_id;
+        if (a.start != b.start) return a.start < b.start;
+        return a.end < b.end;
+    });
+
+    std::vector<RangeHit> merged;
+    merged.reserve(ranges.size());
+    for (const auto& r : ranges) {
+        if (merged.empty() || merged.back().doc_id != r.doc_id || r.start > merged.back().end) {
+            merged.push_back(r);
+            continue;
         }
+        auto& cur = merged.back();
+        cur.end = std::max(cur.end, r.end);
+        if (r.best_score > cur.best_score) {
+            cur.best_score = r.best_score;
+            cur.center_chunk_index = r.center_chunk_index;
+            cur.source = r.source;
+        }
+    }
+
+    hits.clear();
+    hits.reserve(merged.size());
+    for (const auto& r : merged) {
+        RagSearchHit out;
+        out.doc_id = r.doc_id;
+        out.chunk_index = r.center_chunk_index;
+        out.source = r.source;
+        out.score = r.best_score;
+        std::string expanded = rag.expand_range(r.doc_id, r.start, r.end, r.center_chunk_index);
+        if (!expanded.empty()) {
+            out.text = shorten_text(sanitize_utf8_strict(expanded), max_chunk_chars);
+        }
+        hits.push_back(std::move(out));
     }
 }
 
@@ -225,7 +505,9 @@ json build_rag_payload(const std::vector<RagSearchHit>& hits,
                        bool rag_enabled,
                        size_t top_k,
                        size_t doc_count,
-                       size_t chunk_count) {
+                       size_t chunk_count,
+                       const std::vector<std::string>* trace = nullptr,
+                       const std::string* error = nullptr) {
     json rag = {
         {"enabled", rag_enabled},
         {"top_k", top_k},
@@ -233,11 +515,16 @@ json build_rag_payload(const std::vector<RagSearchHit>& hits,
         {"chunk_count", chunk_count},
         {"chunks", json::array()}
     };
+    if (trace) rag["trace"] = *trace;
+    if (error && !error->empty()) rag["error"] = *error;
     for (const auto& hit : hits) {
         rag["chunks"].push_back({
-            {"source", hit.source},
+            {"source", sanitize_utf8_strict(hit.source)},
             {"score", hit.score},
-            {"text", hit.text}
+            {"text", sanitize_utf8_strict(hit.text)},
+            {"doc_id", hit.doc_id},
+            {"chunk_index", hit.chunk_index},
+            {"url", doc_chunk_url(hit.doc_id, hit.chunk_index)}
         });
     }
     return rag;
@@ -282,12 +569,8 @@ json rag_tool_call(const json& args,
         hits = rag.search(query_vec, top_k);
         if (neighbor_chunks > 0 && !hits.empty()) {
             trace.push_back("expand neighbors");
-            for (auto& hit : hits) {
-                std::string expanded = rag.expand_neighbors(hit.doc_id, hit.chunk_index, neighbor_chunks);
-                if (!expanded.empty()) {
-                    hit.text = shorten_text(expanded, max_chunk_chars);
-                }
-            }
+            trace.push_back("dedupe overlaps");
+            expand_hits_with_neighbors(rag, hits, neighbor_chunks, max_chunk_chars);
         }
     }
     auto t1 = std::chrono::steady_clock::now();
@@ -303,9 +586,12 @@ json rag_tool_call(const json& args,
     };
     for (const auto& hit : hits) {
         result["chunks"].push_back({
-            {"source", hit.source},
+            {"source", sanitize_utf8_strict(hit.source)},
             {"score", hit.score},
-            {"text", hit.text}
+            {"text", sanitize_utf8_strict(hit.text)},
+            {"doc_id", hit.doc_id},
+            {"chunk_index", hit.chunk_index},
+            {"url", doc_chunk_url(hit.doc_id, hit.chunk_index)}
         });
     }
     return result;
@@ -461,6 +747,25 @@ int main(int argc, char** argv) {
     opt.db_path = normalize_path(opt.db_path, opt.data_dir);
     opt.pdf_txt_dir = normalize_path(opt.pdf_txt_dir, opt.data_dir);
 
+    bool use_vulkan_runtime = opt.use_vulkan;
+#if NCNN_VULKAN
+    if (opt.use_vulkan) {
+        ncnn::create_gpu_instance();
+        int gpu_count = ncnn::get_gpu_count();
+        if (gpu_count <= 0) {
+            use_vulkan_runtime = false;
+            log_event("vulkan", "requested=1 gpu_count=0 (fallback to cpu)");
+        } else {
+            log_event("vulkan", "requested=1 gpu_count=" + std::to_string(gpu_count));
+        }
+    }
+#else
+    if (opt.use_vulkan) {
+        use_vulkan_runtime = false;
+        log_event("vulkan", "requested=1 but NCNN_VULKAN=0 (rebuild ncnn with vulkan, fallback to cpu)");
+    }
+#endif
+
     log_event("startup", "model_path=" + opt.model_path +
                          " docs_path=" + opt.docs_path +
                          " web_root=" + opt.web_root +
@@ -472,9 +777,11 @@ int main(int argc, char** argv) {
                          " rag_top_k=" + std::to_string(opt.rag_top_k) +
                          " rag_neighbor_chunks=" + std::to_string(opt.rag_neighbor_chunks) +
                          " rag_chunk_max_chars=" + std::to_string(opt.rag_chunk_max_chars) +
+                         " prefill_chunk_bytes=" + std::to_string(opt.llm_prefill_chunk_bytes) +
                          " rag_enabled=" + std::string(opt.rag_enabled ? "1" : "0") +
                          " save_pdf_txt=" + std::string(opt.save_pdf_txt ? "1" : "0") +
-                         " vulkan=" + std::string(opt.use_vulkan ? "1" : "0"));
+                         " vulkan=" + std::string(opt.use_vulkan ? "1" : "0") +
+                         " vulkan_runtime=" + std::string(use_vulkan_runtime ? "1" : "0"));
 
     std::filesystem::path data_root(opt.data_dir);
     std::filesystem::path upload_dir = data_root / "uploads";
@@ -496,6 +803,7 @@ int main(int argc, char** argv) {
     RagEmbedder embedder(opt.embed_dim);
     std::string rag_err;
     bool rag_ready = rag.open(opt.db_path, opt.embed_dim, &rag_err);
+    std::string rag_open_err = rag_err;
     if (!rag_ready) {
         std::cerr << "RAG db warning: " << rag_err << "\n";
         log_event("rag.db", "ready=0 err=" + rag_err);
@@ -513,7 +821,7 @@ int main(int argc, char** argv) {
                               " chunk_count=" + std::to_string(rag.chunk_count()));
     }
 
-    ncnn_llm_gpt model(opt.model_path, opt.use_vulkan);
+    ncnn_llm_gpt model(opt.model_path, use_vulkan_runtime);
     std::mutex model_mutex;
 
     httplib::Server server;
@@ -524,68 +832,91 @@ int main(int argc, char** argv) {
     server.Get("/mcp/tools/list", [&](const httplib::Request&, httplib::Response& res) {
         json tools = json::array();
         tools.push_back(rag_tool_schema());
-        res.set_content(tools.dump(), "application/json");
+        res.set_content(dump_json_safe(tools), "application/json");
     });
 
     server.Post("/mcp/tools/call", [&](const httplib::Request& req, httplib::Response& res) {
-        json body;
+        std::vector<std::string> err_trace;
         try {
-            body = json::parse(req.body);
+            json body;
+            try {
+                body = json::parse(req.body);
+            } catch (const std::exception& e) {
+                res.status = 400;
+                err_trace.push_back("parse json");
+                json errj = make_error(400, std::string("Invalid JSON: ") + e.what());
+                errj["trace"] = err_trace;
+                res.set_content(dump_json_safe(errj), "application/json");
+                log_event("mcp.call.error", std::string("invalid_json=") + e.what());
+                return;
+            }
+
+            const std::string name = body.value("name", "");
+            json args = body.value("arguments", json::object());
+            if (name != "rag_search") {
+                res.status = 400;
+                err_trace.push_back("validate tool name");
+                json errj = make_error(400, "Unknown tool: " + name);
+                errj["trace"] = err_trace;
+                res.set_content(dump_json_safe(errj), "application/json");
+                log_event("mcp.call.error", "unknown_tool name=" + name);
+                return;
+            }
+            if (!rag_ready) {
+                res.status = 500;
+                std::string msg = "RAG database not ready";
+                if (!rag_open_err.empty()) msg += ": " + rag_open_err;
+                err_trace.push_back("open db");
+                json errj = make_error(500, msg);
+                errj["trace"] = err_trace;
+                res.set_content(dump_json_safe(errj), "application/json");
+                log_event("mcp.call.error", "rag_not_ready");
+                return;
+            }
+
+            const std::string query = args.value("query", std::string());
+            size_t top_k = opt.rag_top_k;
+            if (args.contains("top_k") && args["top_k"].is_number_integer()) {
+                int v = args["top_k"].get<int>();
+                if (v > 0) top_k = static_cast<size_t>(v);
+            }
+            log_event("mcp.call", "name=" + name +
+                                  " query_len=" + std::to_string(query.size()) +
+                                  " query=\"" + truncate_for_log(query, 200) + "\"" +
+                                  " top_k=" + std::to_string(top_k));
+
+            json result = rag_tool_call(args, rag, embedder, opt.rag_top_k, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
+            size_t hit_count = 0;
+            if (result.contains("chunks") && result["chunks"].is_array()) {
+                hit_count = result["chunks"].size();
+            }
+            log_event("mcp.call.done", "name=" + name +
+                                      " hits=" + std::to_string(hit_count) +
+                                      " elapsed_ms=" + std::to_string(result.value("elapsed_ms", 0)));
+            json resp = {{"name", name}, {"result", result}};
+            res.set_content(dump_json_safe(resp), "application/json");
         } catch (const std::exception& e) {
-            res.status = 400;
-            res.set_content(make_error(400, std::string("Invalid JSON: ") + e.what()).dump(), "application/json");
-            log_event("mcp.call.error", std::string("invalid_json=") + e.what());
-            return;
-        }
-
-        const std::string name = body.value("name", "");
-        json args = body.value("arguments", json::object());
-        if (name != "rag_search") {
-            res.status = 400;
-            res.set_content(make_error(400, "Unknown tool: " + name).dump(), "application/json");
-            log_event("mcp.call.error", "unknown_tool name=" + name);
-            return;
-        }
-        if (!rag_ready) {
             res.status = 500;
-            res.set_content(make_error(500, "RAG database not ready").dump(), "application/json");
-            log_event("mcp.call.error", "rag_not_ready");
-            return;
+            err_trace.push_back("exception");
+            json errj = make_error(500, std::string("Internal error: ") + e.what());
+            errj["trace"] = err_trace;
+            res.set_content(dump_json_safe(errj), "application/json");
+            log_event("mcp.call.exception", e.what());
         }
-
-        const std::string query = args.value("query", std::string());
-        size_t top_k = opt.rag_top_k;
-        if (args.contains("top_k") && args["top_k"].is_number_integer()) {
-            int v = args["top_k"].get<int>();
-            if (v > 0) top_k = static_cast<size_t>(v);
-        }
-        log_event("mcp.call", "name=" + name +
-                              " query_len=" + std::to_string(query.size()) +
-                              " query=\"" + truncate_for_log(query, 200) + "\"" +
-                              " top_k=" + std::to_string(top_k));
-
-        json result = rag_tool_call(args, rag, embedder, opt.rag_top_k, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
-        size_t hit_count = 0;
-        if (result.contains("chunks") && result["chunks"].is_array()) {
-            hit_count = result["chunks"].size();
-        }
-        log_event("mcp.call.done", "name=" + name +
-                                  " hits=" + std::to_string(hit_count) +
-                                  " elapsed_ms=" + std::to_string(result.value("elapsed_ms", 0)));
-        json resp = {{"name", name}, {"result", result}};
-        res.set_content(resp.dump(), "application/json");
     });
 
     server.Post("/rag/upload", [&](const httplib::Request& req, httplib::Response& res) {
         if (!req.is_multipart_form_data() || !req.has_file("file")) {
             res.status = 400;
-            res.set_content(make_error(400, "multipart file field 'file' required").dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(400, "multipart file field 'file' required")), "application/json");
             log_event("rag.upload.error", "invalid_form");
             return;
         }
         if (!rag_ready) {
             res.status = 500;
-            res.set_content(make_error(500, "RAG database not ready").dump(), "application/json");
+            std::string msg = "RAG database not ready";
+            if (!rag_open_err.empty()) msg += ": " + rag_open_err;
+            res.set_content(dump_json_safe(make_error(500, msg)), "application/json");
             log_event("rag.upload.error", "rag_not_ready");
             return;
         }
@@ -595,7 +926,7 @@ int main(int argc, char** argv) {
         std::string ext = file_ext_lower(filename);
         if (ext != ".txt" && ext != ".pdf") {
             res.status = 400;
-            res.set_content(make_error(400, "only .txt and .pdf are supported").dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(400, "only .txt and .pdf are supported")), "application/json");
             log_event("rag.upload.error", "unsupported_ext filename=" + filename + " ext=" + ext);
             return;
         }
@@ -611,7 +942,7 @@ int main(int argc, char** argv) {
         std::string err;
         if (!write_file(outpath, file.content, &err)) {
             res.status = 500;
-            res.set_content(make_error(500, err).dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(500, err)), "application/json");
             log_event("rag.upload.error", "write_failed err=" + err);
             return;
         }
@@ -630,7 +961,7 @@ int main(int argc, char** argv) {
                              &chunks,
                              &err)) {
             res.status = 500;
-            res.set_content(make_error(500, err).dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(500, err)), "application/json");
             log_event("rag.upload.error", "ingest_failed err=" + err);
             return;
         }
@@ -655,17 +986,137 @@ int main(int argc, char** argv) {
                 {"chunk_count", rag.chunk_count()}
             }}
         };
-        res.set_content(resp.dump(), "application/json");
+        res.set_content(dump_json_safe(resp), "application/json");
     });
 
     server.Get("/rag/info", [&](const httplib::Request&, httplib::Response& res) {
         json info = {
             {"enabled", opt.rag_enabled && rag_ready},
+            {"ready", rag_ready},
             {"doc_count", rag.doc_count()},
             {"chunk_count", rag.chunk_count()},
             {"embed_dim", rag.embed_dim()}
         };
-        res.set_content(info.dump(), "application/json");
+        if (!rag_ready && !rag_open_err.empty()) info["error"] = rag_open_err;
+        res.set_content(dump_json_safe(info), "application/json");
+    });
+
+    server.Get("/rag/docs", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!rag_ready) {
+            res.status = 500;
+            std::string msg = "RAG database not ready";
+            if (!rag_open_err.empty()) msg += ": " + rag_open_err;
+            res.set_content(dump_json_safe(make_error(500, msg)), "application/json");
+            return;
+        }
+        size_t limit = 200;
+        if (auto it = req.params.find("limit"); it != req.params.end()) {
+            if (auto v = parse_int(it->second)) {
+                if (*v > 0) limit = static_cast<size_t>(*v);
+            }
+        }
+        std::vector<RagDocInfo> docs = rag.list_docs(limit, 0);
+        json out = {{"docs", json::array()}};
+        for (const auto& d : docs) {
+            out["docs"].push_back({
+                {"id", d.id},
+                {"filename", sanitize_utf8_strict(d.filename)},
+                {"mime", sanitize_utf8_strict(d.mime)},
+                {"added_at", d.added_at},
+                {"chunk_count", d.chunk_count},
+                {"url", "/rag/doc/" + std::to_string(d.id)}
+            });
+        }
+        res.set_content(dump_json_safe(out), "application/json");
+    });
+
+    server.Delete(R"(/rag/doc/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!rag_ready) {
+            res.status = 500;
+            std::string msg = "RAG database not ready";
+            if (!rag_open_err.empty()) msg += ": " + rag_open_err;
+            res.set_content(dump_json_safe(make_error(500, msg)), "application/json");
+            return;
+        }
+        size_t doc_id = 0;
+        try {
+            doc_id = static_cast<size_t>(std::stoull(req.matches[1]));
+        } catch (...) {
+            res.status = 400;
+            res.set_content(dump_json_safe(make_error(400, "invalid doc id")), "application/json");
+            return;
+        }
+
+        std::string err;
+        if (!rag.delete_doc(doc_id, &err)) {
+            res.status = 404;
+            res.set_content(dump_json_safe(make_error(404, err)), "application/json");
+            log_event("rag.doc.delete.error", "doc_id=" + std::to_string(doc_id) + " err=" + err);
+            return;
+        }
+
+        json out = {
+            {"ok", true},
+            {"doc_id", doc_id},
+            {"doc_count", rag.doc_count()},
+            {"chunk_count", rag.chunk_count()}
+        };
+        res.set_content(dump_json_safe(out), "application/json");
+        log_event("rag.doc.delete", "doc_id=" + std::to_string(doc_id));
+    });
+
+    server.Get(R"(/rag/doc/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!rag_ready) {
+            res.status = 500;
+            res.set_content("RAG database not ready", "text/plain; charset=utf-8");
+            return;
+        }
+
+        size_t doc_id = 0;
+        try {
+            doc_id = static_cast<size_t>(std::stoull(req.matches[1]));
+        } catch (...) {
+            res.status = 400;
+            res.set_content("invalid doc id", "text/plain; charset=utf-8");
+            return;
+        }
+
+        std::string filename;
+        std::vector<RagSearchHit> chunks;
+        std::string err;
+        if (!rag.get_document_chunks(doc_id, &filename, &chunks, &err)) {
+            res.status = 404;
+            res.set_content("document not found", "text/plain; charset=utf-8");
+            log_event("rag.doc.error", "doc_id=" + std::to_string(doc_id) + " err=" + err);
+            return;
+        }
+
+        std::ostringstream html;
+        html << "<!doctype html><html><head><meta charset=\"utf-8\"/>"
+             << "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
+             << "<title>RAG Doc " << doc_id << "</title>"
+             << "<style>"
+             << "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:20px;}"
+             << "h1{margin:0 0 6px 0;font-size:18px;}"
+             << ".meta{color:#555;margin:0 0 18px 0;font-size:13px;}"
+             << "h2{margin:18px 0 6px 0;font-size:15px;}"
+             << "pre{white-space:pre-wrap;word-break:break-word;background:#f6f6f6;padding:12px;border-radius:8px;}"
+             << "a.anchor{color:#888;text-decoration:none;margin-right:8px;}"
+             << "a.back{display:inline-block;margin:0 0 14px 0;color:#06c;text-decoration:none;}"
+             << "</style></head><body>";
+        html << "<a class=\"back\" href=\"/\">← Back</a>";
+        html << "<h1>Document " << doc_id << "</h1>";
+        html << "<p class=\"meta\">filename: " << escape_html(sanitize_utf8_strict(filename)) << " · chunks: " << chunks.size() << "</p>";
+        for (const auto& c : chunks) {
+            html << "<div id=\"chunk-" << c.chunk_index << "\"></div>";
+            html << "<h2><a class=\"anchor\" href=\"#chunk-" << c.chunk_index << "\">#</a>"
+                 << "Chunk " << c.chunk_index << "</h2>";
+            html << "<pre>" << escape_html(sanitize_utf8_strict(c.text)) << "</pre>";
+        }
+        html << "</body></html>";
+
+        res.set_content(html.str(), "text/html; charset=utf-8");
+        log_event("rag.doc", "doc_id=" + std::to_string(doc_id) + " chunks=" + std::to_string(chunks.size()));
     });
 
     server.Post("/v1/chat/completions", [&](const httplib::Request& req, httplib::Response& res) {
@@ -674,14 +1125,14 @@ int main(int argc, char** argv) {
             body = json::parse(req.body);
         } catch (const std::exception& e) {
             res.status = 400;
-            res.set_content(make_error(400, std::string("Invalid JSON: ") + e.what()).dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(400, std::string("Invalid JSON: ") + e.what())), "application/json");
             log_event("chat.error", std::string("invalid_json=") + e.what());
             return;
         }
 
         if (!body.contains("messages") || !body["messages"].is_array()) {
             res.status = 400;
-            res.set_content(make_error(400, "`messages` must be an array").dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(400, "`messages` must be an array")), "application/json");
             log_event("chat.error", "invalid_messages");
             return;
         }
@@ -689,7 +1140,7 @@ int main(int argc, char** argv) {
         std::vector<Message> messages = parse_messages(body["messages"]);
         if (messages.empty()) {
             res.status = 400;
-            res.set_content(make_error(400, "`messages` cannot be empty").dump(), "application/json");
+            res.set_content(dump_json_safe(make_error(400, "`messages` cannot be empty")), "application/json");
             log_event("chat.error", "empty_messages");
             return;
         }
@@ -725,11 +1176,16 @@ int main(int argc, char** argv) {
                                    " thinking=" + std::string(enable_thinking ? "1" : "0") +
                                    " model=" + model_name);
 
+        std::vector<std::string> rag_trace;
+        std::string rag_error;
         std::vector<RagSearchHit> hits;
         if (!client_rag && rag_enabled && rag_ready && !user_query.empty()) {
+            rag_trace.push_back("tokenize+embed");
+            rag_trace.push_back("vector search");
             auto t0 = std::chrono::steady_clock::now();
             std::vector<float> qvec = embedder.embed(user_query);
             hits = rag.search(qvec, rag_top_k);
+            rag_trace.push_back("expand neighbors");
             expand_hits_with_neighbors(rag, hits, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
             auto t1 = std::chrono::steady_clock::now();
             int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
@@ -746,10 +1202,12 @@ int main(int argc, char** argv) {
                 reason = "disabled";
             } else if (!rag_ready) {
                 reason = "db_not_ready";
+                rag_error = rag_open_err;
             } else if (user_query.empty()) {
                 reason = "empty_query";
             }
             if (!reason.empty()) {
+                rag_trace.push_back("skip: " + reason);
                 log_event("rag.search.skip", "id=" + resp_id + " reason=" + reason);
             }
         }
@@ -809,7 +1267,13 @@ int main(int argc, char** argv) {
         if (client_rag && body.contains("rag_payload") && body["rag_payload"].is_object()) {
             rag_payload = body["rag_payload"];
         } else {
-            rag_payload = build_rag_payload(hits, rag_enabled && rag_ready, rag_top_k, rag.doc_count(), rag.chunk_count());
+            rag_payload = build_rag_payload(hits,
+                                            rag_enabled && rag_ready,
+                                            rag_top_k,
+                                            rag.doc_count(),
+                                            rag.chunk_count(),
+                                            rag_trace.empty() ? nullptr : &rag_trace,
+                                            rag_error.empty() ? nullptr : &rag_error);
         }
 
         if (stream) {
@@ -824,7 +1288,7 @@ int main(int argc, char** argv) {
 
                     log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
                     auto prefill_start = std::chrono::steady_clock::now();
-                    auto ctx = model.prefill(prompt);
+                    auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
                     auto prefill_end = std::chrono::steady_clock::now();
                     int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
                     log_event("chat.prefill.done", "id=" + resp_id + " elapsed_ms=" + std::to_string(prefill_ms));
@@ -848,7 +1312,7 @@ int main(int argc, char** argv) {
                                 }
                             })}
                         };
-                        std::string data = "data: " + chunk.dump() + "\n\n";
+                        std::string data = "data: " + dump_json_safe(chunk) + "\n\n";
                         sink.write(data.data(), data.size());
                     });
                     auto gen_end = std::chrono::steady_clock::now();
@@ -872,7 +1336,7 @@ int main(int argc, char** argv) {
                         {"rag", rag_payload}
                     };
 
-                    std::string end_data = "data: " + done_chunk.dump() + "\n\n";
+                    std::string end_data = "data: " + dump_json_safe(done_chunk) + "\n\n";
                     sink.write(end_data.data(), end_data.size());
 
                     const char done[] = "data: [DONE]\n\n";
@@ -888,7 +1352,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lock(model_mutex);
             log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
             auto prefill_start = std::chrono::steady_clock::now();
-            auto ctx = model.prefill(prompt);
+            auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
             auto prefill_end = std::chrono::steady_clock::now();
             int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
             log_event("chat.prefill.done", "id=" + resp_id + " elapsed_ms=" + std::to_string(prefill_ms));
@@ -921,12 +1385,17 @@ int main(int argc, char** argv) {
             {"usage", {{"prompt_tokens", 0}, {"completion_tokens", 0}}},
             {"rag", rag_payload}
         };
-        res.set_content(resp.dump(), "application/json");
+        res.set_content(dump_json_safe(resp), "application/json");
     });
 
     std::cout << "RAG web app listening on http://0.0.0.0:" << opt.port << "\n";
     std::cout << "POST /v1/chat/completions and open / for the demo UI.\n";
     server.listen("0.0.0.0", opt.port);
 
+#if NCNN_VULKAN
+    if (opt.use_vulkan) {
+        ncnn::destroy_gpu_instance();
+    }
+#endif
     return 0;
 }

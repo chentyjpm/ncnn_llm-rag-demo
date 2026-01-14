@@ -12,6 +12,14 @@ struct RagSearchHit {
     int chunk_index = 0;
 };
 
+struct RagDocInfo {
+    size_t id = 0;
+    std::string filename;
+    std::string mime;
+    int64_t added_at = 0;
+    size_t chunk_count = 0;
+};
+
 class RagEmbedder {
 public:
     explicit RagEmbedder(int dim);
@@ -40,6 +48,13 @@ public:
 
     std::vector<RagSearchHit> search(const std::vector<float>& query_vec, size_t top_k) const;
     std::string expand_neighbors(size_t doc_id, int center_chunk_index, int neighbor_chunks) const;
+    std::string expand_range(size_t doc_id, int start_chunk_index, int end_chunk_index, int center_chunk_index) const;
+    bool get_document_chunks(size_t doc_id,
+                             std::string* out_filename,
+                             std::vector<RagSearchHit>* out_chunks,
+                             std::string* err) const;
+    std::vector<RagDocInfo> list_docs(size_t limit = 200, size_t offset = 0) const;
+    bool delete_doc(size_t doc_id, std::string* err);
 
     size_t doc_count() const { return doc_count_; }
     size_t chunk_count() const { return chunk_count_; }
