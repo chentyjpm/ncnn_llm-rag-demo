@@ -84,6 +84,9 @@ target_link_libraries(ncnn_llm_rag_app PRIVATE
 )
 
 target_compile_definitions(ncnn_llm_rag_app PRIVATE NCNN_LLM_WITH_OPENCV=0)
+if (WIN32)
+  target_compile_definitions(ncnn_llm_rag_app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 # Link OpenMP runtime after ncnn (important when ncnn is a static archive).
 if (DEFINED NCNN_OPENMP_LIBRARY AND EXISTS "${NCNN_OPENMP_LIBRARY}")
