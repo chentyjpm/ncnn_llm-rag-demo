@@ -63,6 +63,14 @@ if (WIN32)
   target_compile_definitions(ncnn_llm_rag_app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+# Ensure cpp-httplib builds in HTTP-only mode (no OpenSSL runtime dependency like libssl-3-x64.dll).
+# Some environments may inject CPPHTTPLIB_OPENSSL_SUPPORT via global compiler flags.
+if (MSVC)
+  target_compile_options(ncnn_llm_rag_app PRIVATE /UCPPHTTPLIB_OPENSSL_SUPPORT)
+else()
+  target_compile_options(ncnn_llm_rag_app PRIVATE -UCPPHTTPLIB_OPENSSL_SUPPORT)
+endif()
+
 # Workaround for some ncnn CMake packages that export include dir as ".../include/ncnn".
 # Our code uses "<ncnn/*.h>", which requires adding the parent include dir as well.
 get_target_property(_ncnn_iface_includes ${NCNN_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
