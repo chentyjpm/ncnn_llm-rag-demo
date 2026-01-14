@@ -68,7 +68,7 @@ if (NCNN_INCLUDE_DIR)
   target_include_directories(ncnn_llm_rag_app PRIVATE ${NCNN_INCLUDE_DIR})
 endif()
 
-if (APPLE AND DEFINED NCNN_OPENMP_LIBRARY AND EXISTS "${NCNN_OPENMP_LIBRARY}")
+if (DEFINED NCNN_OPENMP_LIBRARY AND EXISTS "${NCNN_OPENMP_LIBRARY}")
   target_link_libraries(ncnn_llm_rag_app PRIVATE "${NCNN_OPENMP_LIBRARY}")
 endif()
 

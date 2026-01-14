@@ -48,7 +48,9 @@ $includeDir = Resolve-Path (Split-Path (Split-Path $mat.FullName -Parent) -Paren
 Write-Host "NCNN include dir: $includeDir"
 Set-Content -Path (Join-Path $OutDir "NCNN_INCLUDE_DIR.txt") -Value $includeDir -Encoding ascii
 
-$lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" | Where-Object { $_.FullName -match "\\$Arch\\\\" } | Select-Object -First 1
+$lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" |
+  Where-Object { $_.FullName -match "\\\\$Arch\\\\lib\\\\ncnn\\.lib$" } |
+  Select-Object -First 1
 if (-not $lib) {
   $lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" | Select-Object -First 1
 }
