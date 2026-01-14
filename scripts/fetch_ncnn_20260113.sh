@@ -37,6 +37,11 @@ if [[ -z "$PROXY" ]]; then
   PROXY="${NCNN_PROXY:-}"
 fi
 
+# Fall back to standard proxy env vars if NCNN_PROXY is not set.
+if [[ -z "$PROXY" ]]; then
+  PROXY="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+fi
+
 if [[ -z "$OS" ]]; then
   uname_s="$(uname -s | tr '[:upper:]' '[:lower:]')"
   case "$uname_s" in
@@ -105,7 +110,8 @@ echo "$include_dir" > "$OUT_DIR/NCNN_INCLUDE_DIR.txt"
 
 lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.a' -print -quit || true)"
 if [[ -z "$lib_path" ]]; then
-  lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.so' -print -quit || true)"
+  # Some zips may only contain versioned .so (e.g. libncnn.so.1.0.x), especially if symlinks are not preserved.
+  lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.so*' -print -quit || true)"
 fi
 if [[ -z "$lib_path" ]]; then
   lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.dylib' -print -quit || true)"

@@ -19,6 +19,10 @@ $wc = New-Object System.Net.WebClient
 if ($Proxy -eq "" -and $env:NCNN_PROXY) {
   $Proxy = $env:NCNN_PROXY
 }
+if ($Proxy -eq "" -and $env:HTTPS_PROXY) { $Proxy = $env:HTTPS_PROXY }
+if ($Proxy -eq "" -and $env:https_proxy) { $Proxy = $env:https_proxy }
+if ($Proxy -eq "" -and $env:HTTP_PROXY) { $Proxy = $env:HTTP_PROXY }
+if ($Proxy -eq "" -and $env:http_proxy) { $Proxy = $env:http_proxy }
 if ($Proxy -ne "") {
   if ($Proxy -notmatch "^http") { $Proxy = "http://$Proxy" }
   $wc.Proxy = New-Object System.Net.WebProxy($Proxy, $true)
@@ -37,16 +41,18 @@ if (Test-Path $archRoot) {
   Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefix -Encoding ascii
 }
 
-$cfg = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnnConfig.cmake" | Select-Object -First 1
-if (-not $cfg) {
-  Write-Warning "ncnnConfig.cmake not found under $ExtractDir"
+# Prefer arch-specific CMake package files (avoid accidentally picking arm64 on x64 runners).
+$cfg = $null
+if (Test-Path $archRoot) {
+  $cfg = Get-ChildItem -Path $archRoot -Recurse -Filter "ncnnConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
 }
-
 if ($cfg) {
   $prefix = Resolve-Path (Join-Path $cfg.Directory.FullName "..\\..\\..") | Select-Object -ExpandProperty Path
   $prefixCmake = $prefix -replace '\\','/'
-  Write-Host "NCNN install prefix: $prefixCmake"
+  Write-Host "NCNN install prefix (arch): $prefixCmake"
   Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefixCmake -Encoding ascii
+} else {
+  Write-Warning "ncnnConfig.cmake not found under arch root: $archRoot"
 }
 
 $mat = $null
@@ -80,12 +86,12 @@ function Pick-NcnnLib([string]$arch) {
     $picked = $libs | Where-Object { $_.FullName -match "\\\\arm64\\\\lib\\\\ncnn\\.lib$" } | Select-Object -First 1
     if ($picked) { return $picked }
   }
-  return ($libs | Select-Object -First 1)
+  return $null
 }
 
 $lib = Pick-NcnnLib $Arch
 if (-not $lib) {
-  throw "ncnn.lib not found under $ExtractDir"
+  throw "ncnn.lib for arch '$Arch' not found under $ExtractDir"
 }
 $libPath = Resolve-Path $lib.FullName | Select-Object -ExpandProperty Path
 $libPathCmake = $libPath -replace '\\','/'
