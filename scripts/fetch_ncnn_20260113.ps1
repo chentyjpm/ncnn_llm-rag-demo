@@ -26,10 +26,27 @@ Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
 $cfg = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnnConfig.cmake" | Select-Object -First 1
 if (-not $cfg) {
-  throw "ncnnConfig.cmake not found under $ExtractDir"
+  Write-Warning "ncnnConfig.cmake not found under $ExtractDir"
 }
 
-$prefix = Resolve-Path (Join-Path $cfg.Directory.FullName "..\\..\\..") | Select-Object -ExpandProperty Path
-Write-Host "NCNN install prefix: $prefix"
-Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefix -Encoding ascii
+if ($cfg) {
+  $prefix = Resolve-Path (Join-Path $cfg.Directory.FullName "..\\..\\..") | Select-Object -ExpandProperty Path
+  Write-Host "NCNN install prefix: $prefix"
+  Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefix -Encoding ascii
+}
 
+$mat = Get-ChildItem -Path $ExtractDir -Recurse -Filter "mat.h" | Where-Object { $_.FullName -match "\\include\\ncnn\\mat.h$" } | Select-Object -First 1
+if (-not $mat) {
+  throw "include\\ncnn\\mat.h not found under $ExtractDir"
+}
+$includeDir = Resolve-Path (Split-Path (Split-Path $mat.FullName -Parent) -Parent) | Select-Object -ExpandProperty Path
+Write-Host "NCNN include dir: $includeDir"
+Set-Content -Path (Join-Path $OutDir "NCNN_INCLUDE_DIR.txt") -Value $includeDir -Encoding ascii
+
+$lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" | Select-Object -First 1
+if (-not $lib) {
+  throw "ncnn.lib not found under $ExtractDir"
+}
+$libPath = Resolve-Path $lib.FullName | Select-Object -ExpandProperty Path
+Write-Host "NCNN library: $libPath"
+Set-Content -Path (Join-Path $OutDir "NCNN_LIBRARY.txt") -Value $libPath -Encoding ascii

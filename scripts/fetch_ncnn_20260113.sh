@@ -81,12 +81,36 @@ fi
 
 cfg="$(find "$OUT_DIR/extracted" -name 'ncnnConfig.cmake' -print -quit || true)"
 if [[ -z "$cfg" ]]; then
-  echo "ERROR: ncnnConfig.cmake not found under $OUT_DIR/extracted" >&2
-  exit 1
+  echo "WARN: ncnnConfig.cmake not found under $OUT_DIR/extracted" >&2
 fi
 
-prefix="$(cd "$(dirname "$cfg")/../../.." && pwd)"
-echo "NCNN install prefix: $prefix"
-echo "$prefix" > "$OUT_DIR/NCNN_PREFIX.txt"
-echo "Done."
+if [[ -n "$cfg" ]]; then
+  prefix="$(cd "$(dirname "$cfg")/../../.." && pwd)"
+  echo "NCNN install prefix: $prefix"
+  echo "$prefix" > "$OUT_DIR/NCNN_PREFIX.txt"
+fi
 
+mat_h="$(find "$OUT_DIR/extracted" -path '*/include/ncnn/mat.h' -print -quit || true)"
+if [[ -z "$mat_h" ]]; then
+  echo "ERROR: include/ncnn/mat.h not found under $OUT_DIR/extracted" >&2
+  exit 1
+fi
+include_dir="$(cd "$(dirname "$mat_h")/.." && pwd)"
+echo "NCNN include dir: $include_dir"
+echo "$include_dir" > "$OUT_DIR/NCNN_INCLUDE_DIR.txt"
+
+lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.a' -print -quit || true)"
+if [[ -z "$lib_path" ]]; then
+  lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.so' -print -quit || true)"
+fi
+if [[ -z "$lib_path" ]]; then
+  lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.dylib' -print -quit || true)"
+fi
+if [[ -z "$lib_path" ]]; then
+  echo "ERROR: libncnn not found under $OUT_DIR/extracted" >&2
+  exit 1
+fi
+lib_path="$(cd "$(dirname "$lib_path")" && pwd)/$(basename "$lib_path")"
+echo "NCNN library: $lib_path"
+echo "$lib_path" > "$OUT_DIR/NCNN_LIBRARY.txt"
+echo "Done."

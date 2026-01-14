@@ -63,6 +63,10 @@ target_include_directories(ncnn_llm_rag_app PRIVATE
   ncnn_llm/examples/llm_ncnn_run
 )
 
+if (NCNN_INCLUDE_DIR)
+  target_include_directories(ncnn_llm_rag_app PRIVATE ${NCNN_INCLUDE_DIR})
+endif()
+
 target_link_libraries(ncnn_llm_rag_app PRIVATE
   ${NCNN_TARGET}
   nlohmann_json::nlohmann_json

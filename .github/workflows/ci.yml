@@ -22,19 +22,27 @@ jobs:
         run: |
           chmod +x scripts/fetch_ncnn_20260113.sh
           scripts/fetch_ncnn_20260113.sh --out deps/ncnn-prebuilt
-          echo "NCNN_PREFIX=$(cat deps/ncnn-prebuilt/NCNN_PREFIX.txt)" >> "$GITHUB_ENV"
+          if [ -f deps/ncnn-prebuilt/NCNN_PREFIX.txt ]; then
+            echo "NCNN_PREFIX=$(cat deps/ncnn-prebuilt/NCNN_PREFIX.txt)" >> "$GITHUB_ENV"
+          fi
+          echo "NCNN_INCLUDE_DIR=$(cat deps/ncnn-prebuilt/NCNN_INCLUDE_DIR.txt)" >> "$GITHUB_ENV"
+          echo "NCNN_LIBRARY=$(cat deps/ncnn-prebuilt/NCNN_LIBRARY.txt)" >> "$GITHUB_ENV"
 
       - name: Fetch ncnn prebuilt (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./scripts/fetch_ncnn_20260113.ps1 -OutDir deps/ncnn-prebuilt
-          "NCNN_PREFIX=$(Get-Content deps/ncnn-prebuilt/NCNN_PREFIX.txt)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if (Test-Path deps/ncnn-prebuilt/NCNN_PREFIX.txt) {
+            "NCNN_PREFIX=$(Get-Content deps/ncnn-prebuilt/NCNN_PREFIX.txt)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          "NCNN_INCLUDE_DIR=$(Get-Content deps/ncnn-prebuilt/NCNN_INCLUDE_DIR.txt)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NCNN_LIBRARY=$(Get-Content deps/ncnn-prebuilt/NCNN_LIBRARY.txt)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Configure (macOS/Linux)
         if: runner.os != 'Windows'
         run: |
-          cmake -S . -B build-ci -DCMAKE_PREFIX_PATH="${NCNN_PREFIX}"
+          cmake -S . -B build-ci -DCMAKE_PREFIX_PATH="${NCNN_PREFIX:-}" -DNCNN_INCLUDE_DIR="${NCNN_INCLUDE_DIR}" -DNCNN_LIBRARY="${NCNN_LIBRARY}"
 
       - name: Build (macOS/Linux)
         if: runner.os != 'Windows'
@@ -45,7 +53,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake -S . -B build-ci -DCMAKE_PREFIX_PATH="$env:NCNN_PREFIX" -A x64
+          cmake -S . -B build-ci -DCMAKE_PREFIX_PATH="$env:NCNN_PREFIX" -DNCNN_INCLUDE_DIR="$env:NCNN_INCLUDE_DIR" -DNCNN_LIBRARY="$env:NCNN_LIBRARY" -A x64
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
