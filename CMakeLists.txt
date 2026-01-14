@@ -82,29 +82,24 @@ target_link_libraries(ncnn_llm_rag_app PRIVATE
 target_compile_definitions(ncnn_llm_rag_app PRIVATE NCNN_LLM_WITH_OPENCV=0)
 
 # Detect whether the linked ncnn provides Vulkan GPU instance API, to avoid link failures on non-vulkan builds.
+# (On Windows, backslashes in paths can break CMake's try_compile unless normalized.)
 set(_ncnn_has_vulkan_api 0)
 if (NCNN_INCLUDE_DIR AND NCNN_LIBRARY)
-  set(CMAKE_REQUIRED_INCLUDES "${NCNN_INCLUDE_DIR}")
-  set(CMAKE_REQUIRED_LIBRARIES "${NCNN_LIBRARY}")
-  check_cxx_source_compiles("
-    #include <ncnn/gpu.h>
-    int main() { return ncnn::get_gpu_count(); }
-  " _ncnn_gpu_api_compiles)
-  # check_cxx_source_compiles does not link; use try_compile for link check.
-  if (_ncnn_gpu_api_compiles)
-    file(WRITE ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu.cpp [=[
+  file(TO_CMAKE_PATH "${NCNN_INCLUDE_DIR}" _ncnn_inc_cmake)
+  file(TO_CMAKE_PATH "${NCNN_LIBRARY}" _ncnn_lib_cmake)
+
+  file(WRITE ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu.cpp [=[
 #include <ncnn/gpu.h>
 int main(){ return ncnn::get_gpu_count(); }
 ]=])
-    try_compile(_ncnn_gpu_api_links
-      ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu_build
-      ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu.cpp
-      LINK_LIBRARIES "${NCNN_LIBRARY}"
-      CMAKE_FLAGS "-DCMAKE_CXX_FLAGS=-I${NCNN_INCLUDE_DIR}"
-    )
-    if (_ncnn_gpu_api_links)
-      set(_ncnn_has_vulkan_api 1)
-    endif()
+  try_compile(_ncnn_gpu_api_links
+    ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu_build
+    ${CMAKE_BINARY_DIR}/cmake_check_ncnn_gpu.cpp
+    LINK_LIBRARIES "${_ncnn_lib_cmake}"
+    CMAKE_FLAGS "-DCMAKE_CXX_FLAGS=-I${_ncnn_inc_cmake}"
+  )
+  if (_ncnn_gpu_api_links)
+    set(_ncnn_has_vulkan_api 1)
   endif()
 endif()
 

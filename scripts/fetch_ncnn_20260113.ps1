@@ -45,25 +45,38 @@ if (-not $mat) {
   throw "include\\ncnn\\mat.h not found under $ExtractDir"
 }
 $includeDir = Resolve-Path (Split-Path (Split-Path $mat.FullName -Parent) -Parent) | Select-Object -ExpandProperty Path
-Write-Host "NCNN include dir: $includeDir"
-Set-Content -Path (Join-Path $OutDir "NCNN_INCLUDE_DIR.txt") -Value $includeDir -Encoding ascii
+$includeDirCmake = $includeDir -replace '\\','/'
+Write-Host "NCNN include dir: $includeDirCmake"
+Set-Content -Path (Join-Path $OutDir "NCNN_INCLUDE_DIR.txt") -Value $includeDirCmake -Encoding ascii
 
-$lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" |
-  Where-Object { $_.FullName -match "\\\\$Arch\\\\lib\\\\ncnn\\.lib$" } |
-  Select-Object -First 1
-if (-not $lib) {
-  $lib = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" | Select-Object -First 1
+function Pick-NcnnLib([string]$arch) {
+  $libs = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" -ErrorAction SilentlyContinue
+  if (-not $libs) { return $null }
+  if ($arch -eq "x64") {
+    $picked = $libs | Where-Object { $_.FullName -match "\\\\x64\\\\lib\\\\ncnn\\.lib$" } | Select-Object -First 1
+    if ($picked) { return $picked }
+    $picked = $libs | Where-Object { $_.FullName -match "\\\\amd64\\\\lib\\\\ncnn\\.lib$" } | Select-Object -First 1
+    if ($picked) { return $picked }
+  } elseif ($arch -eq "arm64") {
+    $picked = $libs | Where-Object { $_.FullName -match "\\\\arm64\\\\lib\\\\ncnn\\.lib$" } | Select-Object -First 1
+    if ($picked) { return $picked }
+  }
+  return ($libs | Select-Object -First 1)
 }
+
+$lib = Pick-NcnnLib $Arch
 if (-not $lib) {
   throw "ncnn.lib not found under $ExtractDir"
 }
 $libPath = Resolve-Path $lib.FullName | Select-Object -ExpandProperty Path
-Write-Host "NCNN library: $libPath"
-Set-Content -Path (Join-Path $OutDir "NCNN_LIBRARY.txt") -Value $libPath -Encoding ascii
+$libPathCmake = $libPath -replace '\\','/'
+Write-Host "NCNN library: $libPathCmake"
+Set-Content -Path (Join-Path $OutDir "NCNN_LIBRARY.txt") -Value $libPathCmake -Encoding ascii
 
 $openmp = Get-ChildItem -Path $ExtractDir -Recurse -Filter "openmp.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($openmp) {
   $openmpPath = Resolve-Path $openmp.FullName | Select-Object -ExpandProperty Path
-  Write-Host "OpenMP runtime: $openmpPath"
-  Set-Content -Path (Join-Path $OutDir "NCNN_OPENMP_LIBRARY.txt") -Value $openmpPath -Encoding ascii
+  $openmpPathCmake = $openmpPath -replace '\\','/'
+  Write-Host "OpenMP runtime: $openmpPathCmake"
+  Set-Content -Path (Join-Path $OutDir "NCNN_OPENMP_LIBRARY.txt") -Value $openmpPathCmake -Encoding ascii
 }
