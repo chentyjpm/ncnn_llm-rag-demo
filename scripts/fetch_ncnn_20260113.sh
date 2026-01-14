@@ -117,6 +117,21 @@ if [[ -z "$cfg" ]]; then
     openmp_bin="$(find "$OUT_DIR/extracted" -type f -path '*/openmp.framework/openmp' -print -quit || true)"
   fi
 
+  # Optional deps for Vulkan-enabled builds.
+  # - glslang/SPIRV may be shipped as static libs or frameworks.
+  # - Vulkan loader may be shipped as a dylib or framework.
+  glslang_libs=()
+  while IFS= read -r p; do glslang_libs+=("$p"); done < <(find "$OUT_DIR/extracted" -type f \
+    \( -name 'libglslang.a' -o -name 'libSPIRV.a' -o -name 'libSPIRV-Tools.a' -o -name 'libSPIRV-Tools-opt.a' \
+       -o -name 'libOGLCompiler.a' -o -name 'libOSDependent.a' -o -name 'libHLSL.a' \) 2>/dev/null | sort || true)
+  # Framework-style glslang (rare).
+  glslang_framework_bin="$(find "$OUT_DIR/extracted" -type f -path '*/glslang.framework/Versions/*/glslang' -print -quit 2>/dev/null || true)"
+  if [[ -z "$glslang_framework_bin" ]]; then
+    glslang_framework_bin="$(find "$OUT_DIR/extracted" -type f -path '*/glslang.framework/glslang' -print -quit 2>/dev/null || true)"
+  fi
+
+  vulkan_loader="$(find "$OUT_DIR/extracted" -type f \( -name 'libvulkan*.dylib' -o -path '*/vulkan.framework/Versions/*/vulkan' -o -path '*/vulkan.framework/vulkan' \) -print -quit 2>/dev/null || true)"
+
   if [[ -z "$ncnn_bin" || -z "$ncnn_hdr_dir" ]]; then
     echo "ERROR: macOS framework prebuilt detected but ncnn.framework is incomplete (missing binary or headers)" >&2
     exit 1
@@ -137,6 +152,12 @@ if [[ -z "$cfg" ]]; then
   ncnn_hdr_dir="$(cd "$ncnn_hdr_dir" && pwd)"
   if [[ -n "$openmp_bin" ]]; then
     openmp_bin="$(cd "$(dirname "$openmp_bin")" && pwd)/$(basename "$openmp_bin")"
+  fi
+  if [[ -n "$glslang_framework_bin" ]]; then
+    glslang_framework_bin="$(cd "$(dirname "$glslang_framework_bin")" && pwd)/$(basename "$glslang_framework_bin")"
+  fi
+  if [[ -n "$vulkan_loader" ]]; then
+    vulkan_loader="$(cd "$(dirname "$vulkan_loader")" && pwd)/$(basename "$vulkan_loader")"
   fi
 
   cat > "$gen_cfg_dir/ncnnConfig.cmake" <<EOF
@@ -159,6 +180,18 @@ if(EXISTS "${openmp_bin}")
   set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES ncnn_openmp)
 endif()
 
+if(EXISTS "${vulkan_loader}")
+  add_library(ncnn_vulkan_loader SHARED IMPORTED)
+  set_target_properties(ncnn_vulkan_loader PROPERTIES IMPORTED_LOCATION "${vulkan_loader}")
+  set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES ncnn_vulkan_loader)
+endif()
+
+if(EXISTS "${glslang_framework_bin}")
+  add_library(ncnn_glslang SHARED IMPORTED)
+  set_target_properties(ncnn_glslang PROPERTIES IMPORTED_LOCATION "${glslang_framework_bin}")
+  set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES ncnn_glslang)
+endif()
+
 find_package(Threads REQUIRED)
 set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES Threads::Threads)
 
@@ -167,6 +200,19 @@ if(NOT ncnn_FIND_QUIETLY)
   message(STATUS "Found ncnn: \${NCNN_VERSION} (generated config for macOS frameworks)")
 endif()
 EOF
+
+  if [[ ${#glslang_libs[@]} -gt 0 ]]; then
+    {
+      echo ""
+      echo "# Link bundled glslang/SPIRV static libraries (required by Vulkan builds)."
+      for p in "${glslang_libs[@]}"; do
+        abs="$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+        echo "if(EXISTS \"${abs}\")"
+        echo "  set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES \"${abs}\")"
+        echo "endif()"
+      done
+    } >> "$gen_cfg_dir/ncnnConfig.cmake"
+  fi
 
   cfg="$gen_cfg_dir/ncnnConfig.cmake"
 fi
