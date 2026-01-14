@@ -10,7 +10,9 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#if defined(NCNN_RAG_HAS_VULKAN_API) && NCNN_RAG_HAS_VULKAN_API
 #include <ncnn/gpu.h>
+#endif
 
 #include <cstdlib>
 #include <algorithm>
@@ -748,7 +750,7 @@ int main(int argc, char** argv) {
     opt.pdf_txt_dir = normalize_path(opt.pdf_txt_dir, opt.data_dir);
 
     bool use_vulkan_runtime = opt.use_vulkan;
-#if NCNN_VULKAN
+#if defined(NCNN_RAG_HAS_VULKAN_API) && NCNN_RAG_HAS_VULKAN_API
     if (opt.use_vulkan) {
         ncnn::create_gpu_instance();
         int gpu_count = ncnn::get_gpu_count();
@@ -762,7 +764,7 @@ int main(int argc, char** argv) {
 #else
     if (opt.use_vulkan) {
         use_vulkan_runtime = false;
-        log_event("vulkan", "requested=1 but NCNN_VULKAN=0 (rebuild ncnn with vulkan, fallback to cpu)");
+        log_event("vulkan", "requested=1 but ncnn gpu api unavailable (fallback to cpu)");
     }
 #endif
 
@@ -1392,7 +1394,7 @@ int main(int argc, char** argv) {
     std::cout << "POST /v1/chat/completions and open / for the demo UI.\n";
     server.listen("0.0.0.0", opt.port);
 
-#if NCNN_VULKAN
+#if defined(NCNN_RAG_HAS_VULKAN_API) && NCNN_RAG_HAS_VULKAN_API
     if (opt.use_vulkan) {
         ncnn::destroy_gpu_instance();
     }

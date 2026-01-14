@@ -58,3 +58,10 @@ if (-not $lib) {
 $libPath = Resolve-Path $lib.FullName | Select-Object -ExpandProperty Path
 Write-Host "NCNN library: $libPath"
 Set-Content -Path (Join-Path $OutDir "NCNN_LIBRARY.txt") -Value $libPath -Encoding ascii
+
+$openmp = Get-ChildItem -Path $ExtractDir -Recurse -Filter "openmp.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($openmp) {
+  $openmpPath = Resolve-Path $openmp.FullName | Select-Object -ExpandProperty Path
+  Write-Host "OpenMP runtime: $openmpPath"
+  Set-Content -Path (Join-Path $OutDir "NCNN_OPENMP_LIBRARY.txt") -Value $openmpPath -Encoding ascii
+}

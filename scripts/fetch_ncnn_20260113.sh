@@ -123,4 +123,14 @@ fi
 lib_path="$(cd "$(dirname "$lib_path")" && pwd)/$(basename "$lib_path")"
 echo "NCNN library: $lib_path"
 echo "$lib_path" > "$OUT_DIR/NCNN_LIBRARY.txt"
+
+openmp_bin="$(find "$OUT_DIR/extracted" -type f -path '*/openmp.framework/Versions/*/openmp' -print -quit || true)"
+if [[ -z "$openmp_bin" ]]; then
+  openmp_bin="$(find "$OUT_DIR/extracted" -type f -path '*/openmp.framework/openmp' -print -quit || true)"
+fi
+if [[ -n "$openmp_bin" ]]; then
+  openmp_bin="$(cd "$(dirname "$openmp_bin")" && pwd)/$(basename "$openmp_bin")"
+  echo "OpenMP runtime: $openmp_bin"
+  echo "$openmp_bin" > "$OUT_DIR/NCNN_OPENMP_LIBRARY.txt"
+fi
 echo "Done."
