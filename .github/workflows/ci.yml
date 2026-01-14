@@ -42,13 +42,22 @@ jobs:
           $gpuH = Join-Path $prefix "include\\ncnn\\gpu.h"
           if (Test-Path $cfg) {
             Write-Host "ncnnConfig.cmake: $cfg"
-            Select-String -Path $cfg -Pattern "set\\(NCNN_(VULKAN|SIMPLEVK|OPENMP|SHARED_LIB)\\b" | ForEach-Object { $_.Line } | Write-Host
+            Select-String -Path $cfg -SimpleMatch -Pattern @(
+              "set(NCNN_VULKAN",
+              "set(NCNN_SIMPLEVK",
+              "set(NCNN_OPENMP",
+              "set(NCNN_SHARED_LIB"
+            ) | ForEach-Object { $_.Line } | Write-Host
           } else {
             Write-Host "ncnnConfig.cmake not found: $cfg"
           }
           if (Test-Path $gpuH) {
             Write-Host "gpu.h: $gpuH"
-            Select-String -Path $gpuH -Pattern "create_gpu_instance|get_gpu_count|destroy_gpu_instance" | ForEach-Object { $_.Line } | Write-Host
+            Select-String -Path $gpuH -SimpleMatch -Pattern @(
+              "create_gpu_instance",
+              "get_gpu_count",
+              "destroy_gpu_instance"
+            ) | ForEach-Object { $_.Line } | Write-Host
           } else {
             Write-Host "gpu.h not found: $gpuH"
           }
