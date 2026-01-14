@@ -80,7 +80,33 @@ if (_ncnn_iface_includes)
   endif()
 endif()
 
-# If the package exports NCNN_VULKAN, use it to gate optional Vulkan calls in our code.
-if (DEFINED NCNN_VULKAN AND NCNN_VULKAN)
+# Gate optional Vulkan GPU instance calls based on whether headers expose the API.
+set(_ncnn_has_gpu_instance_api 0)
+set(_ncnn_check_includes "")
+if (_ncnn_iface_includes)
+  list(APPEND _ncnn_check_includes ${_ncnn_iface_includes})
+endif()
+if (DEFINED _ncnn_extra_includes AND _ncnn_extra_includes)
+  list(APPEND _ncnn_check_includes ${_ncnn_extra_includes})
+endif()
+if (_ncnn_check_includes)
+  set(_old_req_inc "${CMAKE_REQUIRED_INCLUDES}")
+  set(CMAKE_REQUIRED_INCLUDES ${_ncnn_check_includes})
+  check_cxx_source_compiles([=[
+#include <ncnn/gpu.h>
+int main() {
+  ncnn::create_gpu_instance();
+  int c = ncnn::get_gpu_count();
+  ncnn::destroy_gpu_instance();
+  return c;
+}
+]=] _ncnn_gpu_instance_compiles)
+  set(CMAKE_REQUIRED_INCLUDES "${_old_req_inc}")
+  if (_ncnn_gpu_instance_compiles)
+    set(_ncnn_has_gpu_instance_api 1)
+  endif()
+endif()
+
+if (_ncnn_has_gpu_instance_api)
   target_compile_definitions(ncnn_llm_rag_app PRIVATE NCNN_RAG_HAS_VULKAN_API=1)
 endif()

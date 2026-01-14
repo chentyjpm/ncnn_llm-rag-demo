@@ -72,8 +72,14 @@ download_and_extract() {
 }
 
 if [[ "$OS" == "macos" ]]; then
-  url="https://github.com/Tencent/ncnn/releases/download/${TAG}/ncnn-${TAG}-macos.zip"
-  download_and_extract "$url" "$OUT_DIR/ncnn-${TAG}-${OS}.zip"
+  # Prefer Vulkan-enabled build if available (it provides ncnn::create_gpu_instance/get_gpu_count).
+  url_vulkan="https://github.com/Tencent/ncnn/releases/download/${TAG}/ncnn-${TAG}-macos-vulkan.zip"
+  url_plain="https://github.com/Tencent/ncnn/releases/download/${TAG}/ncnn-${TAG}-macos.zip"
+  if curl "${curl_args[@]}" -I "$url_vulkan" >/dev/null 2>&1; then
+    download_and_extract "$url_vulkan" "$OUT_DIR/ncnn-${TAG}-${OS}-vulkan.zip"
+  else
+    download_and_extract "$url_plain" "$OUT_DIR/ncnn-${TAG}-${OS}.zip"
+  fi
 elif [[ "$OS" == "linux" ]]; then
   # Prefer newer ubuntu toolchain if available.
   url2404="https://github.com/Tencent/ncnn/releases/download/${TAG}/ncnn-${TAG}-ubuntu-2404.zip"
@@ -116,6 +122,12 @@ if [[ -z "$cfg" ]]; then
     exit 1
   fi
 
+  # Try to detect whether the headers expose Vulkan GPU instance API.
+  _has_gpu_api=0
+  if [[ -f "$ncnn_hdr_dir/ncnn/gpu.h" ]] && rg -n "create_gpu_instance\\s*\\(" "$ncnn_hdr_dir/ncnn/gpu.h" >/dev/null 2>&1; then
+    _has_gpu_api=1
+  fi
+
   gen_prefix="$OUT_DIR/prefix"
   gen_cfg_dir="$gen_prefix/lib/cmake/ncnn"
   mkdir -p "$gen_cfg_dir"
@@ -131,7 +143,7 @@ if [[ -z "$cfg" ]]; then
 set(NCNN_VERSION ${TAG})
 set(NCNN_OPENMP ON)
 set(NCNN_THREADS ON)
-set(NCNN_VULKAN ON)
+set(NCNN_VULKAN ${_has_gpu_api})
 set(NCNN_SHARED_LIB ON)
 set(NCNN_SIMPLEVK ON)
 
