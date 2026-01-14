@@ -103,18 +103,18 @@ include_dir="$(cd "$(dirname "$mat_h")/.." && pwd)"
 echo "NCNN include dir: $include_dir"
 echo "$include_dir" > "$OUT_DIR/NCNN_INCLUDE_DIR.txt"
 
-lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.a' -print -quit || true)"
+lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.a' -print -quit || true)"
 if [[ -z "$lib_path" ]]; then
-  lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.so' -print -quit || true)"
+  lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.so' -print -quit || true)"
 fi
 if [[ -z "$lib_path" ]]; then
-  lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.dylib' -print -quit || true)"
+  lib_path="$(find "$OUT_DIR/extracted" -type f -name 'libncnn.dylib' -print -quit || true)"
 fi
 if [[ -z "$lib_path" ]]; then
-  lib_path="$(find "$OUT_DIR/extracted" -path '*/ncnn.framework/Versions/*/ncnn' -print -quit || true)"
+  lib_path="$(find "$OUT_DIR/extracted" -type f -path '*/ncnn.framework/Versions/*/ncnn' -print -quit || true)"
 fi
 if [[ -z "$lib_path" ]]; then
-  lib_path="$(find "$OUT_DIR/extracted" -path '*/ncnn.framework/ncnn' -print -quit || true)"
+  lib_path="$(find "$OUT_DIR/extracted" -type f -path '*/ncnn.framework/ncnn' -print -quit || true)"
 fi
 if [[ -z "$lib_path" ]]; then
   echo "ERROR: libncnn not found under $OUT_DIR/extracted" >&2
