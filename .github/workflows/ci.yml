@@ -60,3 +60,17 @@ jobs:
         shell: pwsh
         run: |
           cmake --build build-ci --config Release
+
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncnn_llm_rag_app-${{ runner.os }}
+          if-no-files-found: warn
+          path: |
+            build-ci/ncnn_llm_rag_app
+            build-ci/Release/ncnn_llm_rag_app.exe
+            build-ci/RelWithDebInfo/ncnn_llm_rag_app.exe
+            build-ci/MinSizeRel/ncnn_llm_rag_app.exe
+            build-ci/CMakeCache.txt
+            deps/ncnn-prebuilt/*.txt

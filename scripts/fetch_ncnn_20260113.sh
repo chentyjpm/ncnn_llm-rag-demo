@@ -33,6 +33,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$PROXY" ]]; then
+  PROXY="${NCNN_PROXY:-}"
+fi
+
 if [[ -z "$OS" ]]; then
   uname_s="$(uname -s | tr '[:upper:]' '[:lower:]')"
   case "$uname_s" in
@@ -90,7 +94,7 @@ if [[ -n "$cfg" ]]; then
   echo "$prefix" > "$OUT_DIR/NCNN_PREFIX.txt"
 fi
 
-mat_h="$(find "$OUT_DIR/extracted" -path '*/include/ncnn/mat.h' -print -quit || true)"
+mat_h="$(find "$OUT_DIR/extracted" \( -path '*/include/ncnn/mat.h' -o -path '*/Headers/ncnn/mat.h' \) -print -quit || true)"
 if [[ -z "$mat_h" ]]; then
   echo "ERROR: include/ncnn/mat.h not found under $OUT_DIR/extracted" >&2
   exit 1
@@ -105,6 +109,12 @@ if [[ -z "$lib_path" ]]; then
 fi
 if [[ -z "$lib_path" ]]; then
   lib_path="$(find "$OUT_DIR/extracted" -name 'libncnn.dylib' -print -quit || true)"
+fi
+if [[ -z "$lib_path" ]]; then
+  lib_path="$(find "$OUT_DIR/extracted" -path '*/ncnn.framework/Versions/*/ncnn' -print -quit || true)"
+fi
+if [[ -z "$lib_path" ]]; then
+  lib_path="$(find "$OUT_DIR/extracted" -path '*/ncnn.framework/ncnn' -print -quit || true)"
 fi
 if [[ -z "$lib_path" ]]; then
   echo "ERROR: libncnn not found under $OUT_DIR/extracted" >&2

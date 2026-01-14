@@ -14,6 +14,9 @@ $Url = "https://github.com/Tencent/ncnn/releases/download/$Tag/ncnn-$Tag-windows
 Write-Host "Downloading: $Url"
 
 $wc = New-Object System.Net.WebClient
+if ($Proxy -eq "" -and $env:NCNN_PROXY) {
+  $Proxy = $env:NCNN_PROXY
+}
 if ($Proxy -ne "") {
   if ($Proxy -notmatch "^http") { $Proxy = "http://$Proxy" }
   $wc.Proxy = New-Object System.Net.WebProxy($Proxy, $true)

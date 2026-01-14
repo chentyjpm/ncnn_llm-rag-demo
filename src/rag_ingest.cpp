@@ -13,7 +13,21 @@ namespace fs = std::filesystem;
 
 namespace {
 
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#endif
+
 std::string shell_escape(const std::string& s) {
+#ifdef _WIN32
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+#else
     std::string out = "'";
     for (char c : s) {
         if (c == '\'') {
@@ -24,11 +38,17 @@ std::string shell_escape(const std::string& s) {
     }
     out.push_back('\'');
     return out;
+#endif
 }
 
 bool command_exists(const std::string& name) {
+#ifdef _WIN32
+    std::string cmd = "where " + name + " >nul 2>nul";
+    return std::system(cmd.c_str()) == 0;
+#else
     std::string cmd = "command -v " + name + " >/dev/null 2>&1";
     return std::system(cmd.c_str()) == 0;
+#endif
 }
 
 } // namespace
