@@ -90,9 +90,73 @@ fi
 
 cfg="$(find "$OUT_DIR/extracted" -name 'ncnnConfig.cmake' -print -quit || true)"
 if [[ -z "$cfg" ]]; then
-  echo "ERROR: ncnnConfig.cmake not found under $OUT_DIR/extracted" >&2
-  echo "This project uses find_package(ncnn CONFIG REQUIRED); please use a prebuilt that ships CMake package files." >&2
-  exit 1
+  if [[ "$OS" != "macos" ]]; then
+    echo "ERROR: ncnnConfig.cmake not found under $OUT_DIR/extracted" >&2
+    echo "This project uses find_package(ncnn CONFIG REQUIRED); please use a prebuilt that ships CMake package files." >&2
+    exit 1
+  fi
+
+  # macOS prebuilt may ship as frameworks without CMake package files.
+  # Generate a minimal ncnnConfig.cmake so the project can still use find_package(ncnn CONFIG REQUIRED).
+  ncnn_bin="$(find "$OUT_DIR/extracted" -type f -path '*/ncnn.framework/Versions/*/ncnn' -print -quit || true)"
+  if [[ -z "$ncnn_bin" ]]; then
+    ncnn_bin="$(find "$OUT_DIR/extracted" -type f -path '*/ncnn.framework/ncnn' -print -quit || true)"
+  fi
+  ncnn_hdr_dir="$(find "$OUT_DIR/extracted" -type d -path '*/ncnn.framework/Versions/*/Headers' -print -quit || true)"
+  if [[ -z "$ncnn_hdr_dir" ]]; then
+    ncnn_hdr_dir="$(find "$OUT_DIR/extracted" -type d -path '*/ncnn.framework/Headers' -print -quit || true)"
+  fi
+  openmp_bin="$(find "$OUT_DIR/extracted" -type f -path '*/openmp.framework/Versions/*/openmp' -print -quit || true)"
+  if [[ -z "$openmp_bin" ]]; then
+    openmp_bin="$(find "$OUT_DIR/extracted" -type f -path '*/openmp.framework/openmp' -print -quit || true)"
+  fi
+
+  if [[ -z "$ncnn_bin" || -z "$ncnn_hdr_dir" ]]; then
+    echo "ERROR: macOS framework prebuilt detected but ncnn.framework is incomplete (missing binary or headers)" >&2
+    exit 1
+  fi
+
+  gen_prefix="$OUT_DIR/prefix"
+  gen_cfg_dir="$gen_prefix/lib/cmake/ncnn"
+  mkdir -p "$gen_cfg_dir"
+
+  # Resolve to absolute paths for robustness.
+  ncnn_bin="$(cd "$(dirname "$ncnn_bin")" && pwd)/$(basename "$ncnn_bin")"
+  ncnn_hdr_dir="$(cd "$ncnn_hdr_dir" && pwd)"
+  if [[ -n "$openmp_bin" ]]; then
+    openmp_bin="$(cd "$(dirname "$openmp_bin")" && pwd)/$(basename "$openmp_bin")"
+  fi
+
+  cat > "$gen_cfg_dir/ncnnConfig.cmake" <<EOF
+set(NCNN_VERSION ${TAG})
+set(NCNN_OPENMP ON)
+set(NCNN_THREADS ON)
+set(NCNN_VULKAN ON)
+set(NCNN_SHARED_LIB ON)
+set(NCNN_SIMPLEVK ON)
+
+add_library(ncnn SHARED IMPORTED)
+set_target_properties(ncnn PROPERTIES
+  IMPORTED_LOCATION "${ncnn_bin}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ncnn_hdr_dir}"
+)
+
+if(EXISTS "${openmp_bin}")
+  add_library(ncnn_openmp SHARED IMPORTED)
+  set_target_properties(ncnn_openmp PROPERTIES IMPORTED_LOCATION "${openmp_bin}")
+  set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES ncnn_openmp)
+endif()
+
+find_package(Threads REQUIRED)
+set_property(TARGET ncnn APPEND PROPERTY INTERFACE_LINK_LIBRARIES Threads::Threads)
+
+set(ncnn_FOUND TRUE)
+if(NOT ncnn_FIND_QUIETLY)
+  message(STATUS "Found ncnn: \${NCNN_VERSION} (generated config for macOS frameworks)")
+endif()
+EOF
+
+  cfg="$gen_cfg_dir/ncnnConfig.cmake"
 fi
 
 if [[ -n "$cfg" ]]; then
