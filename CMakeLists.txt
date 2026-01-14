@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(ncnn_llm_rag_demo LANGUAGES CXX)
+project(ncnn_llm_rag_demo LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,7 +43,10 @@ find_package(Threads REQUIRED)
 
 add_executable(ncnn_llm_rag_app
   src/app_main.cpp
-  src/rag_index.cpp
+  src/rag_vector_db.cpp
+  src/rag_text.cpp
+  src/rag_ingest.cpp
+  third_party/sqlite/sqlite-amalgamation-3510200/sqlite3.c
   ncnn_llm/src/ncnn_llm_gpt.cpp
   ncnn_llm/src/utils/rope_embed.cpp
   ncnn_llm/src/utils/prompt.cpp
@@ -55,6 +58,7 @@ add_executable(ncnn_llm_rag_app
 
 target_include_directories(ncnn_llm_rag_app PRIVATE
   src
+  third_party/sqlite/sqlite-amalgamation-3510200
   ncnn_llm/src
   ncnn_llm/examples/llm_ncnn_run
 )

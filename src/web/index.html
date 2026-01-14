@@ -54,9 +54,26 @@
             <input type="checkbox" id="rag" checked>
           </div>
           <div class="control-row">
-            <span>Top-K</span>
-            <input type="number" id="ragTopK" min="1" max="10" value="4">
+            <span>检索模式</span>
+            <select id="retrievalMode">
+              <option value="heuristic" selected>传统关键词</option>
+              <option value="raw">原始问题</option>
+              <option value="llm">LLM 关键词</option>
+            </select>
           </div>
+          <div class="control-row">
+            <span>Top-K</span>
+            <input type="number" id="ragTopK" min="1" max="10" value="10">
+          </div>
+        </section>
+
+        <section class="panel card upload">
+          <h2>上传文档</h2>
+          <form id="uploadForm" class="upload-form">
+            <input id="uploadFile" type="file" accept=".txt,.pdf,application/pdf,text/plain">
+            <button id="uploadBtn" type="submit">上传并索引</button>
+          </form>
+          <p class="hint">支持 txt 和可复制文字的 PDF（需要 pdftotext）。</p>
         </section>
       </aside>
     </main>

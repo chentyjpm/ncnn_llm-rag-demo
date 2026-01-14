@@ -5,10 +5,14 @@ const sendBtn = document.getElementById('send');
 const streamBox = document.getElementById('stream');
 const thinkBox = document.getElementById('think');
 const ragBox = document.getElementById('rag');
+const retrievalMode = document.getElementById('retrievalMode');
 const ragTopK = document.getElementById('ragTopK');
 const ragStatus = document.getElementById('ragStatus');
 const ragProcess = document.getElementById('ragProcess');
 const sources = document.getElementById('sources');
+const uploadForm = document.getElementById('uploadForm');
+const uploadFile = document.getElementById('uploadFile');
+const uploadBtn = document.getElementById('uploadBtn');
 
 const history = [];
 let mcpReady = false;
@@ -131,6 +135,77 @@ function buildSystemPrompt(context, ragEnabled) {
   return prompt;
 }
 
+async function summarizeKeywords(query) {
+  const payload = {
+    model: 'qwen3-0.6b',
+    messages: [
+      { role: 'system', content: 'Extract concise search keywords for retrieval. Output keywords only, separated by spaces.' },
+      { role: 'user', content: query }
+    ],
+    stream: false,
+    rag_mode: 'client',
+    temperature: 0.0,
+    top_p: 1.0,
+    max_tokens: 64
+  };
+  const resp = await fetch('/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!resp.ok) {
+    const msg = await resp.text();
+    throw new Error(`keyword summarize failed: ${msg}`);
+  }
+  const j = await resp.json();
+  const content = j.choices?.[0]?.message?.content || '';
+  return content.trim();
+}
+
+function extractKeywordsHeuristic(query, maxTokens = 8) {
+  const q = (query || '').trim();
+  if (!q) return '';
+
+  const cnStop = new Set([
+    '的', '了', '和', '与', '及', '或', '是', '在', '有', '没有',
+    '我', '你', '他', '她', '它', '我们', '你们', '他们', '她们',
+    '这', '那', '这些', '那些', '一个', '一种', '如何', '怎么', '为什么', '什么',
+    '请', '帮我', '一下', '一下子', '能否', '可以', '以及'
+  ]);
+  const enStop = new Set([
+    'the', 'a', 'an', 'of', 'to', 'in', 'on', 'for', 'and', 'or', 'is', 'are', 'was', 'were',
+    'with', 'as', 'by', 'at', 'from', 'that', 'this', 'these', 'those', 'it', 'its', 'be'
+  ]);
+
+  const counts = new Map();
+  const add = (t) => {
+    const tok = (t || '').trim();
+    if (!tok) return;
+    const lower = tok.toLowerCase();
+    if (lower.length <= 1) return;
+    if (cnStop.has(tok) || enStop.has(lower)) return;
+    counts.set(tok, (counts.get(tok) || 0) + 1);
+  };
+
+  const cnPhrases = q.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  cnPhrases.forEach(add);
+
+  const enWords = q.match(/[A-Za-z0-9]+/g) || [];
+  enWords.forEach(add);
+
+  if (counts.size === 0) {
+    const han = (q.match(/[\u4e00-\u9fff]/g) || []).join('');
+    for (let i = 0; i + 1 < han.length; i++) add(han.slice(i, i + 2));
+  }
+
+  const scored = Array.from(counts.entries()).map(([tok, freq]) => {
+    const len = tok.length;
+    return { tok, score: freq * (len >= 6 ? 2.0 : len >= 4 ? 1.5 : 1.0) };
+  });
+  scored.sort((a, b) => b.score - a.score || b.tok.length - a.tok.length);
+  return scored.slice(0, maxTokens).map((x) => x.tok).join(' ');
+}
+
 async function fetchRagInfo() {
   try {
     const resp = await fetch('/rag/info');
@@ -138,7 +213,8 @@ async function fetchRagInfo() {
     const info = await resp.json();
     const enabled = info.enabled ? '已启用' : '未启用';
     const tool = mcpReady ? 'MCP: rag_search' : 'MCP: 不可用';
-    setStatus(`索引状态：${enabled} · 文档 ${info.doc_count} · 片段 ${info.chunk_count} · ${tool}`);
+    const dim = info.embed_dim ? `dim ${info.embed_dim}` : 'dim ?';
+    setStatus(`索引状态：${enabled} · 文档 ${info.doc_count} · 片段 ${info.chunk_count} · ${dim} · ${tool}`);
   } catch (err) {
     setStatus('索引状态：无法读取');
   }
@@ -174,7 +250,8 @@ async function sendMessage(content) {
   const stream = streamBox.checked;
   const disableThinking = thinkBox.checked;
   const ragEnabled = ragBox.checked;
-  const topK = parseInt(ragTopK.value, 10) || 4;
+  const topK = parseInt(ragTopK.value, 10) || 10;
+  const mode = retrievalMode?.value || 'heuristic';
 
   history.push({ role: 'user', content });
   addMessage('user', content);
@@ -189,11 +266,47 @@ async function sendMessage(content) {
       logProcess('MCP 工具不可用，跳过检索', true);
     } else {
       try {
+        let keywordQuery = content;
+        if (mode === 'raw') {
+          logProcess('检索模式：原始问题', true);
+          keywordQuery = content;
+        } else if (mode === 'llm') {
+          logProcess('检索模式：LLM 关键词', true);
+          logProcess(`关键词提炼输入：${content}`);
+          try {
+            const summarized = await summarizeKeywords(content);
+            if (summarized) {
+              keywordQuery = summarized;
+              logProcess(`关键词提炼输出：${keywordQuery}`, true);
+            } else {
+              logProcess('关键词为空，使用原始问题', true);
+            }
+          } catch (err) {
+            logProcess(`关键词提炼失败：${err.message}（回退到原始问题）`, true);
+            keywordQuery = content;
+          }
+        } else {
+          logProcess('检索模式：传统关键词', true);
+          keywordQuery = extractKeywordsHeuristic(content);
+          if (keywordQuery) {
+            logProcess(`关键词提炼输出：${keywordQuery}`, true);
+          } else {
+            keywordQuery = content;
+            logProcess('关键词为空，使用原始问题', true);
+          }
+        }
+
         logProcess('调用 MCP 工具 rag_search...', true);
-        const result = await callMcpTool('rag_search', { query: content, top_k: topK });
+        const result = await callMcpTool('rag_search', { query: keywordQuery, top_k: topK });
         ragChunks = result.chunks || [];
         ragContext = result.context || buildRagContext(ragChunks);
         ragActive = true;
+        if (Array.isArray(result.trace)) {
+          result.trace.forEach((line) => logProcess(`检索步骤：${line}`));
+        }
+        if (result.elapsed_ms !== undefined) {
+          logProcess(`检索耗时：${result.elapsed_ms} ms`);
+        }
         logProcess(`检索完成：命中 ${ragChunks.length} 个片段`);
         if (ragContext) {
           logProcess(`构造上下文：${ragContext.length} 字符`);
@@ -277,6 +390,42 @@ form.addEventListener('submit', (e) => {
   if (!text) return;
   input.value = '';
   sendMessage(text);
+});
+
+uploadForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = uploadFile.files[0];
+  if (!file) {
+    resetProcess();
+    logProcess('请选择要上传的文件', true);
+    return;
+  }
+  resetProcess();
+  logProcess(`开始上传：${file.name}`, true);
+  uploadBtn.disabled = true;
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const resp = await fetch('/rag/upload', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const msg = await resp.text();
+      throw new Error(msg);
+    }
+    const data = await resp.json();
+    if (Array.isArray(data.trace)) {
+      data.trace.forEach((line) => logProcess(`索引步骤：${line}`));
+    }
+    if (data.doc) {
+      logProcess(`索引完成：${data.doc.filename} · ${data.doc.chunks} 片段`, true);
+    }
+    await fetchRagInfo();
+  } catch (err) {
+    logProcess(`上传失败：${err.message}`, true);
+  } finally {
+    uploadBtn.disabled = false;
+    uploadFile.value = '';
+  }
 });
 
 fetchMcpTools().then(fetchRagInfo);
