@@ -29,6 +29,14 @@ if (Test-Path $ExtractDir) { Remove-Item -Recurse -Force $ExtractDir }
 New-Item -ItemType Directory -Force -Path $ExtractDir | Out-Null
 Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
+$root = Join-Path $ExtractDir "ncnn-$Tag-windows-vs2022"
+$archRoot = Join-Path $root $Arch
+if (Test-Path $archRoot) {
+  $prefix = (Resolve-Path $archRoot | Select-Object -ExpandProperty Path) -replace '\\','/'
+  Write-Host "NCNN arch prefix: $prefix"
+  Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefix -Encoding ascii
+}
+
 $cfg = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnnConfig.cmake" | Select-Object -First 1
 if (-not $cfg) {
   Write-Warning "ncnnConfig.cmake not found under $ExtractDir"
@@ -36,11 +44,17 @@ if (-not $cfg) {
 
 if ($cfg) {
   $prefix = Resolve-Path (Join-Path $cfg.Directory.FullName "..\\..\\..") | Select-Object -ExpandProperty Path
-  Write-Host "NCNN install prefix: $prefix"
-  Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefix -Encoding ascii
+  $prefixCmake = $prefix -replace '\\','/'
+  Write-Host "NCNN install prefix: $prefixCmake"
+  Set-Content -Path (Join-Path $OutDir "NCNN_PREFIX.txt") -Value $prefixCmake -Encoding ascii
 }
 
-$mat = Get-ChildItem -Path $ExtractDir -Recurse -Filter "mat.h" | Where-Object { $_.FullName -match "\\include\\ncnn\\mat.h$" } | Select-Object -First 1
+$mat = $null
+if (Test-Path (Join-Path $archRoot "include\\ncnn\\mat.h")) {
+  $mat = Get-Item (Join-Path $archRoot "include\\ncnn\\mat.h")
+} else {
+  $mat = Get-ChildItem -Path $ExtractDir -Recurse -Filter "mat.h" | Where-Object { $_.FullName -match "\\\\include\\\\ncnn\\\\mat\\.h$" } | Select-Object -First 1
+}
 if (-not $mat) {
   throw "include\\ncnn\\mat.h not found under $ExtractDir"
 }
@@ -50,6 +64,11 @@ Write-Host "NCNN include dir: $includeDirCmake"
 Set-Content -Path (Join-Path $OutDir "NCNN_INCLUDE_DIR.txt") -Value $includeDirCmake -Encoding ascii
 
 function Pick-NcnnLib([string]$arch) {
+  $root = Join-Path $ExtractDir "ncnn-$Tag-windows-vs2022"
+  $archRoot = Join-Path $root $arch
+  $direct = Join-Path $archRoot "lib\\ncnn.lib"
+  if (Test-Path $direct) { return (Get-Item $direct) }
+
   $libs = Get-ChildItem -Path $ExtractDir -Recurse -Filter "ncnn.lib" -ErrorAction SilentlyContinue
   if (-not $libs) { return $null }
   if ($arch -eq "x64") {
