@@ -323,7 +323,7 @@ struct AppOptions {
     std::string data_dir = "data";
     std::string db_path = "data/rag.sqlite";
     std::string pdf_txt_dir = "data/pdf_txt";
-    size_t chunk_size = 900;
+    size_t chunk_size = 600;
     int embed_dim = 256;
     int port = 8080;
     bool use_vulkan = false;
@@ -343,7 +343,7 @@ void print_usage(const char* argv0) {
               << "  --data PATH       Data directory (default: data)\n"
               << "  --db PATH         SQLite database path (default: data/rag.sqlite)\n"
               << "  --pdf-txt PATH    Exported PDF text directory (default: data/pdf_txt)\n"
-              << "  --chunk-size N    Chunk size for indexing (default: 900)\n"
+              << "  --chunk-size N    Chunk size for indexing (default: 600)\n"
               << "  --embed-dim N     Embedding dimension (default: 256)\n"
               << "  --port N          HTTP port (default: 8080)\n"
               << "  --rag-top-k N     Retrieved chunks (default: 10)\n"

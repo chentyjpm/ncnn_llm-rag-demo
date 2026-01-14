@@ -108,6 +108,11 @@ function renderSources(rag) {
     const strong = document.createElement('strong');
     strong.textContent = `[${idx + 1}] ${chunk.source}`;
     title.appendChild(strong);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const score = typeof chunk.score === 'number' ? chunk.score.toFixed(4) : '';
+    meta.textContent = score ? `score ${score}` : '';
+    if (meta.textContent) title.appendChild(meta);
     if (chunk.url) {
       const link = document.createElement('a');
       link.href = chunk.url;
@@ -117,10 +122,7 @@ function renderSources(rag) {
       link.textContent = '打开原文';
       title.appendChild(link);
     }
-    const body = document.createElement('div');
-    body.textContent = chunk.text;
     div.appendChild(title);
-    div.appendChild(body);
     sources.appendChild(div);
   });
 }

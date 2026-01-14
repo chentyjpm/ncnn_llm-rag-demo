@@ -1,5 +1,11 @@
 # ncnn-llm-rag-demo
 
+[![ci-linux](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-linux.yml/badge.svg)](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-linux.yml)
+[![ci-macos](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-macos.yml/badge.svg)](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-macos.yml)
+[![ci-windows](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/chentyjpm/ncnn_llm-rag-demo/actions/workflows/ci-windows.yml)
+
+![demo](img/demo.png)
+
 基于 **ncnn** 的本地离线 LLM + RAG 检索增强问答 Demo（单个可执行程序 + 内置 Web UI），用于验证/调试 `ncnn_llm` 在文档检索场景下的集成效果。
 
 配合来使用的项目/依赖：
@@ -84,6 +90,33 @@ cmake --build build -j
 ./build/ncnn_llm_rag_app
 ```
 
+命令行（CLI）输出示例：
+
+```bash
+./build/ncnn_llm_rag_app --help
+```
+
+```text
+Usage: ./build/ncnn_llm_rag_app [options]
+  --model PATH      Model directory (default: assets/qwen3_0.6b)
+  --docs PATH       Seed docs directory (default: assets/rag)
+  --web PATH        Web root to serve (default: src/web)
+  --data PATH       Data directory (default: data)
+  --db PATH         SQLite database path (default: data/rag.sqlite)
+  --pdf-txt PATH    Exported PDF text directory (default: data/pdf_txt)
+  --chunk-size N    Chunk size for indexing (default: 600)
+  --embed-dim N     Embedding dimension (default: 256)
+  --port N          HTTP port (default: 8080)
+  --rag-top-k N     Retrieved chunks (default: 10)
+  --rag-neighbors N Include neighbor chunks around each hit (default: 1)
+  --rag-chunk-max N Max chars per returned chunk after expansion (default: 1800)
+  --prefill-chunk-bytes N Chunk prompt for prefill to reduce memory (default: 2048)
+  --no-rag          Disable retrieval
+  --no-pdf-txt      Disable exporting extracted PDF text
+  --vulkan          Enable Vulkan compute
+  --help            Show this help
+```
+
 默认监听：
 - Web UI：`http://localhost:8080/`
 - OpenAI 接口：`POST http://localhost:8080/v1/chat/completions`
@@ -92,7 +125,7 @@ cmake --build build -j
 - `--model PATH`：模型目录（默认 `assets/qwen3_0.6b`）
 - `--db PATH`：SQLite DB（默认 `data/rag.sqlite`）
 - `--pdf-txt PATH`：PDF 导出 txt 目录（默认 `data/pdf_txt`）
-- `--chunk-size N`：切片大小（默认 900）
+- `--chunk-size N`：切片大小（默认 600）
 - `--rag-top-k N`：检索返回数量（默认 10）
 - `--rag-neighbors N`：命中 chunk 前后扩展（默认 1）
 - `--rag-chunk-max N`：扩展后单段最大字符数（默认 1800）

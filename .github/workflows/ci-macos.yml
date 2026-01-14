@@ -1,0 +1,39 @@
+name: ci-macos
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Fetch ncnn prebuilt
+        run: |
+          chmod +x scripts/fetch_ncnn_20260113.sh
+          scripts/fetch_ncnn_20260113.sh --out deps/ncnn-prebuilt
+          echo "NCNN_PREFIX=$(cat deps/ncnn-prebuilt/NCNN_PREFIX.txt)" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="${NCNN_PREFIX}"
+
+      - name: Build
+        run: |
+          cmake --build build-ci -j
+
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncnn_llm_rag_app-macos
+          if-no-files-found: warn
+          path: |
+            build-ci/ncnn_llm_rag_app
+            build-ci/CMakeCache.txt
+            deps/ncnn-prebuilt/*.txt

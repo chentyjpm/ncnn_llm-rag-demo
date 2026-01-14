@@ -439,20 +439,43 @@ std::string RagVectorDb::expand_range(size_t doc_id,
     sqlite3_bind_int(stmt.stmt, 2, start_chunk_index);
     sqlite3_bind_int(stmt.stmt, 3, end_chunk_index);
 
-    std::string out;
-    bool first = true;
+    std::vector<std::pair<int, std::string>> rows;
+    rows.reserve(static_cast<size_t>(std::max(0, end_chunk_index - start_chunk_index + 1)));
     while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
         int idx = sqlite3_column_int(stmt.stmt, 0);
         const unsigned char* text = sqlite3_column_text(stmt.stmt, 1);
         if (!text) continue;
-        if (!first) out += "\n\n";
-        first = false;
-        if (idx != center_chunk_index) {
-            out += "(neighbor chunk " + std::to_string(idx) + ")\n";
-        } else {
-            out += "(matched chunk " + std::to_string(idx) + ")\n";
+        rows.emplace_back(idx, reinterpret_cast<const char*>(text));
+    }
+    if (rows.empty()) return {};
+
+    auto append_chunk = [&](std::string& out, int idx, const std::string& text, bool matched) {
+        if (!out.empty()) out += "\n\n";
+        out += matched ? "(matched chunk " : "(neighbor chunk ";
+        out += std::to_string(idx) + ")\n";
+        out += text;
+    };
+
+    // Put the matched chunk first so truncation keeps the most important part.
+    std::string out;
+    int center_pos = -1;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (rows[i].first == center_chunk_index) {
+            center_pos = static_cast<int>(i);
+            break;
         }
-        out += reinterpret_cast<const char*>(text);
+    }
+    if (center_pos < 0) {
+        for (const auto& r : rows) append_chunk(out, r.first, r.second, false);
+        return out;
+    }
+
+    append_chunk(out, rows[static_cast<size_t>(center_pos)].first, rows[static_cast<size_t>(center_pos)].second, true);
+    for (int i = center_pos - 1; i >= 0; --i) {
+        append_chunk(out, rows[static_cast<size_t>(i)].first, rows[static_cast<size_t>(i)].second, false);
+    }
+    for (size_t i = static_cast<size_t>(center_pos) + 1; i < rows.size(); ++i) {
+        append_chunk(out, rows[i].first, rows[i].second, false);
     }
     return out;
 }

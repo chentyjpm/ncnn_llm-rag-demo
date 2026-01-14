@@ -219,6 +219,50 @@ button:active { transform: translateY(1px); }
   gap: 16px;
 }
 
+.rag-results {
+  display: flex;
+  flex-direction: column;
+  max-height: min(70dvh, 640px);
+  min-height: 320px;
+}
+
+.rag-results .process {
+  max-height: 160px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.rag-results .sources {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.rag-results .sources {
+  gap: 8px;
+}
+
+.rag-results .source {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.rag-results .source strong {
+  display: inline;
+  margin: 0;
+}
+
+.rag-results .source .meta {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+}
+
 .card {
   padding: 16px;
 }
