@@ -14,9 +14,64 @@ const docsList = document.getElementById('docsList');
 const uploadForm = document.getElementById('uploadForm');
 const uploadFile = document.getElementById('uploadFile');
 const uploadBtn = document.getElementById('uploadBtn');
+const tokenStats = document.getElementById('tokenStats');
+const memStats = document.getElementById('memStats');
 
 const history = [];
 let mcpReady = false;
+let lastUsage = null;
+let lastMem = null;
+
+function setTokenStats(usage) {
+  if (!tokenStats) return;
+  if (!usage || typeof usage !== 'object') {
+    tokenStats.textContent = 'Tokens：-';
+    return;
+  }
+  const prompt = Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : null;
+  const completion = Number.isFinite(usage.completion_tokens) ? usage.completion_tokens : null;
+  const total = Number.isFinite(usage.total_tokens) ? usage.total_tokens : (prompt !== null && completion !== null ? prompt + completion : null);
+
+  if (total === null) {
+    tokenStats.textContent = 'Tokens：-';
+    return;
+  }
+  const parts = [];
+  parts.push(`KV ${total}`);
+  if (prompt !== null) parts.push(`prompt ${prompt}`);
+  if (completion !== null) parts.push(`gen ${completion}`);
+  tokenStats.textContent = `Tokens：${parts.join(' · ')}`;
+  lastUsage = usage;
+}
+
+function toMiB(bytes) {
+  const b = typeof bytes === 'number' ? bytes : Number(bytes);
+  if (!Number.isFinite(b)) return null;
+  return b / 1024 / 1024;
+}
+
+function fmtMiB(bytes, digits = 1) {
+  const m = toMiB(bytes);
+  if (m === null) return null;
+  return `${m.toFixed(digits)} MiB`;
+}
+
+function setMemStats(mem) {
+  if (!memStats) return;
+  if (!mem || typeof mem !== 'object') {
+    memStats.textContent = 'Mem：-';
+    return;
+  }
+  const rss = fmtMiB(mem.rss_bytes);
+  const hwm = fmtMiB(mem.hwm_bytes);
+  const kv = fmtMiB(mem.kv_cache_bytes);
+  const parts = [];
+  if (rss) parts.push(`RSS ${rss}`);
+  if (hwm) parts.push(`HWM ${hwm}`);
+  if (kv) parts.push(`KV ${kv}`);
+  memStats.textContent = parts.length ? `Mem：${parts.join(' · ')}` : 'Mem：-';
+  lastMem = mem;
+}
 
 function escapeHtml(str) {
   return str
@@ -345,6 +400,8 @@ async function sendMessage(content) {
   history.push({ role: 'user', content });
   addMessage('user', content);
   addMessage('assistant', '生成中...');
+  setTokenStats(null);
+  setMemStats(null);
 
   resetProcess();
   let ragChunks = [];
@@ -454,6 +511,8 @@ async function sendMessage(content) {
           if (data === '[DONE]') { streamDone = true; break; }
           try {
             const j = JSON.parse(data);
+            if (j.usage) setTokenStats(j.usage);
+            if (j.mem) setMemStats(j.mem);
             const delta = j.choices?.[0]?.delta?.content || '';
             assistantText += delta;
             updateLastAssistantHTML(renderAssistantStreaming(assistantText));
@@ -467,6 +526,8 @@ async function sendMessage(content) {
       const j = await resp.json();
       assistantText = j.choices?.[0]?.message?.content || '';
       updateLastAssistantHTML(renderAssistantStreaming(assistantText));
+      if (j.usage) setTokenStats(j.usage);
+      if (j.mem) setMemStats(j.mem);
     }
     history.push({ role: 'assistant', content: assistantText });
   } catch (err) {

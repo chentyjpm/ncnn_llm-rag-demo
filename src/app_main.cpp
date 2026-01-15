@@ -15,6 +15,10 @@
 #include <ncnn/gpu.h>
 #endif
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <cstdlib>
 #include <algorithm>
 #include <chrono>
@@ -44,6 +48,89 @@ struct HttpUrlParts {
     int port = 80;
     std::string base_path;
 };
+
+struct MemSnapshot {
+    size_t rss_bytes = 0;
+    size_t hwm_bytes = 0;
+};
+
+bool getenv_int(const char* name, int* out) {
+    if (!out) return false;
+    const char* v = std::getenv(name);
+    if (!v || !*v) return false;
+    if (auto parsed = parse_int(v)) {
+        *out = *parsed;
+        return true;
+    }
+    return false;
+}
+
+void configure_glibc_malloc_from_env() {
+#if defined(__GLIBC__)
+    int arena_max = 0;
+    if (getenv_int("NCNN_RAG_MALLOC_ARENA_MAX", &arena_max) && arena_max > 0) {
+        mallopt(M_ARENA_MAX, arena_max);
+    }
+
+    int trim_threshold = 0;
+    if (getenv_int("NCNN_RAG_MALLOC_TRIM_THRESHOLD", &trim_threshold) && trim_threshold >= 0) {
+        mallopt(M_TRIM_THRESHOLD, trim_threshold);
+    }
+
+    int mmap_threshold = 0;
+    if (getenv_int("NCNN_RAG_MALLOC_MMAP_THRESHOLD", &mmap_threshold) && mmap_threshold >= 0) {
+        mallopt(M_MMAP_THRESHOLD, mmap_threshold);
+    }
+#endif
+}
+
+void maybe_malloc_trim(bool enabled) {
+#if defined(__GLIBC__)
+    if (enabled) {
+        malloc_trim(0);
+    }
+#else
+    (void)enabled;
+#endif
+}
+
+size_t parse_proc_status_kb_line(const std::string& line) {
+    // Example: "VmRSS:\t  12345 kB"
+    size_t i = 0;
+    while (i < line.size() && (line[i] < '0' || line[i] > '9')) ++i;
+    size_t value = 0;
+    for (; i < line.size() && line[i] >= '0' && line[i] <= '9'; ++i) {
+        value = value * 10 + static_cast<size_t>(line[i] - '0');
+    }
+    return value * 1024;
+}
+
+MemSnapshot read_self_mem_snapshot() {
+    MemSnapshot out;
+    std::ifstream f("/proc/self/status");
+    if (!f) return out;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("VmRSS:", 0) == 0) {
+            out.rss_bytes = parse_proc_status_kb_line(line);
+        } else if (line.rfind("VmHWM:", 0) == 0) {
+            out.hwm_bytes = parse_proc_status_kb_line(line);
+        }
+    }
+    return out;
+}
+
+size_t kv_cache_bytes(const std::shared_ptr<ncnn_llm_gpt_ctx>& ctx) {
+    if (!ctx) return 0;
+    size_t total = 0;
+    for (const auto& kv : ctx->kv_cache) {
+        const ncnn::Mat& k = kv.first;
+        const ncnn::Mat& v = kv.second;
+        total += static_cast<size_t>(k.total()) * static_cast<size_t>(k.elemsize);
+        total += static_cast<size_t>(v.total()) * static_cast<size_t>(v.elemsize);
+    }
+    return total;
+}
 
 bool parse_url_base(const std::string& url_in, HttpUrlParts* out, std::string* err) {
     if (!out) return false;
@@ -655,6 +742,7 @@ struct AppOptions {
     int model_download_total_timeout_sec = 0; // 0 = no overall timeout
     bool model_download_use_proxy = false;
     std::string model_download_proxy = "";
+    bool malloc_trim = false;
 };
 
 void print_usage(const char* argv0) {
@@ -682,6 +770,7 @@ void print_usage(const char* argv0) {
               << "  --no-rag          Disable retrieval\n"
               << "  --no-pdf-txt      Disable exporting extracted PDF text\n"
               << "  --vulkan          Enable Vulkan compute\n"
+              << "  --malloc-trim     Call malloc_trim(0) after each request (glibc)\n"
               << "  --help            Show this help\n";
 }
 
@@ -741,6 +830,8 @@ AppOptions parse_options(int argc, char** argv) {
             opt.save_pdf_txt = false;
         } else if (arg == "--vulkan") {
             opt.use_vulkan = true;
+        } else if (arg == "--malloc-trim") {
+            opt.malloc_trim = true;
         }
     }
     return opt;
@@ -1097,6 +1188,13 @@ size_t ingest_directory(const std::string& dir,
 
 int main(int argc, char** argv) {
     AppOptions opt = parse_options(argc, argv);
+    configure_glibc_malloc_from_env();
+    {
+        int trim_enabled = 0;
+        if (getenv_int("NCNN_RAG_MALLOC_TRIM", &trim_enabled)) {
+            opt.malloc_trim = (trim_enabled != 0);
+        }
+    }
     opt.model_path = normalize_path(opt.model_path, "./assets");
     opt.docs_path = normalize_path(opt.docs_path, ".");
     opt.data_dir = normalize_path(opt.data_dir, ".");
@@ -1702,68 +1800,82 @@ int main(int argc, char** argv) {
                                             rag_error.empty() ? nullptr : &rag_error);
         }
 
-        if (stream) {
-            res.set_header("Content-Type", "text/event-stream");
-            res.set_header("Cache-Control", "no-cache");
-            res.set_header("Connection", "keep-alive");
+	        if (stream) {
+	            res.set_header("Content-Type", "text/event-stream");
+	            res.set_header("Cache-Control", "no-cache");
+	            res.set_header("Connection", "keep-alive");
 
-            res.set_chunked_content_provider(
-                "text/event-stream",
-                [&, prompt, cfg, resp_id, model_name, rag_payload](size_t, httplib::DataSink& sink) mutable {
-                    std::lock_guard<std::mutex> lock(model_mutex);
+	            res.set_chunked_content_provider(
+	                "text/event-stream",
+	                [&, prompt, cfg, resp_id, model_name, rag_payload](size_t, httplib::DataSink& sink) mutable {
+	                    std::lock_guard<std::mutex> lock(model_mutex);
 
-                    log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
-                    auto prefill_start = std::chrono::steady_clock::now();
-                    auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
-                    auto prefill_end = std::chrono::steady_clock::now();
-                    int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
-                    log_event("chat.prefill.done", "id=" + resp_id + " elapsed_ms=" + std::to_string(prefill_ms));
+	                    log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
+	                    auto prefill_start = std::chrono::steady_clock::now();
+	                    auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
+	                    const size_t prompt_tokens = (!ctx || ctx->kv_cache.empty()) ? 0u : static_cast<size_t>(ctx->kv_cache[0].first.h);
+	                    auto prefill_end = std::chrono::steady_clock::now();
+	                    int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
+	                    log_event("chat.prefill.done", "id=" + resp_id + " elapsed_ms=" + std::to_string(prefill_ms));
 
-                    size_t token_count = 0;
-                    size_t output_bytes = 0;
-                    auto gen_start = std::chrono::steady_clock::now();
-                    model.generate(ctx, cfg, [&](const std::string& token) {
-                        std::string safe_token = sanitize_utf8(token);
-                        ++token_count;
-                        output_bytes += safe_token.size();
-                        json chunk = {
-                            {"id", resp_id},
-                            {"object", "chat.completion.chunk"},
-                            {"model", model_name},
-                            {"choices", json::array({
-                                json{
-                                    {"index", 0},
-                                    {"delta", {{"role", "assistant"}, {"content", safe_token}}},
-                                    {"finish_reason", nullptr}
-                                }
-                            })}
-                        };
-                        std::string data = "data: " + dump_json_safe(chunk) + "\n\n";
-                        sink.write(data.data(), data.size());
-                    });
-                    auto gen_end = std::chrono::steady_clock::now();
-                    int64_t gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start).count();
-                    log_event("chat.generate.done", "id=" + resp_id +
-                                                   " tokens=" + std::to_string(token_count) +
-                                                   " output_bytes=" + std::to_string(output_bytes) +
-                                                   " elapsed_ms=" + std::to_string(gen_ms));
+	                    size_t token_count = 0;
+	                    size_t output_bytes = 0;
+	                    auto gen_start = std::chrono::steady_clock::now();
+	                    model.generate(ctx, cfg, [&](const std::string& token) {
+	                        std::string safe_token = sanitize_utf8(token);
+	                        ++token_count;
+	                        output_bytes += safe_token.size();
+	                        json chunk = {
+	                            {"id", resp_id},
+	                            {"object", "chat.completion.chunk"},
+	                            {"model", model_name},
+	                            {"choices", json::array({
+	                                json{
+	                                    {"index", 0},
+	                                    {"delta", {{"role", "assistant"}, {"content", safe_token}}},
+	                                    {"finish_reason", nullptr}
+	                                }
+	                            })},
+	                            {"usage", {{"prompt_tokens", prompt_tokens},
+	                                       {"completion_tokens", token_count},
+	                                       {"total_tokens", prompt_tokens + token_count}}}
+	                        };
+	                        std::string data = "data: " + dump_json_safe(chunk) + "\n\n";
+	                        sink.write(data.data(), data.size());
+	                    });
+	                    auto gen_end = std::chrono::steady_clock::now();
+	                    int64_t gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start).count();
+	                    log_event("chat.generate.done", "id=" + resp_id +
+	                                                   " tokens=" + std::to_string(token_count) +
+	                                                   " output_bytes=" + std::to_string(output_bytes) +
+	                                                   " elapsed_ms=" + std::to_string(gen_ms));
 
-                    json done_chunk = {
-                        {"id", resp_id},
-                        {"object", "chat.completion.chunk"},
-                        {"model", model_name},
-                        {"choices", json::array({
-                            json{
-                                {"index", 0},
-                                {"delta", json::object()},
-                                {"finish_reason", "stop"}
-                            }
-                        })},
-                        {"rag", rag_payload}
-                    };
+	                    const size_t kv_bytes = kv_cache_bytes(ctx);
+	                    ctx.reset();
+	                    maybe_malloc_trim(opt.malloc_trim);
+	                    MemSnapshot mem = read_self_mem_snapshot();
+	                    json done_chunk = {
+	                        {"id", resp_id},
+	                        {"object", "chat.completion.chunk"},
+	                        {"model", model_name},
+	                        {"choices", json::array({
+	                            json{
+	                                {"index", 0},
+	                                {"delta", json::object()},
+	                                {"finish_reason", "stop"}
+	                            }
+	                        })},
+	                        {"usage", {{"prompt_tokens", prompt_tokens},
+	                                   {"completion_tokens", token_count},
+	                                   {"total_tokens", prompt_tokens + token_count}}},
+	                        {"mem", {{"rss_bytes", mem.rss_bytes},
+	                                 {"hwm_bytes", mem.hwm_bytes},
+	                                 {"kv_cache_bytes", kv_bytes}}},
+	                        {"rag", rag_payload}
+	                    };
 
-                    std::string end_data = "data: " + dump_json_safe(done_chunk) + "\n\n";
-                    sink.write(end_data.data(), end_data.size());
+	                    std::string end_data = "data: " + dump_json_safe(done_chunk) + "\n\n";
+	                    sink.write(end_data.data(), end_data.size());
 
                     const char done[] = "data: [DONE]\n\n";
                     sink.write(done, sizeof(done) - 1);
@@ -1773,15 +1885,20 @@ int main(int argc, char** argv) {
             return;
         }
 
-        std::string generated;
-        {
-            std::lock_guard<std::mutex> lock(model_mutex);
-            log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
-            auto prefill_start = std::chrono::steady_clock::now();
-            auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
-            auto prefill_end = std::chrono::steady_clock::now();
-            int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
-            log_event("chat.prefill.done", "id=" + resp_id + " elapsed_ms=" + std::to_string(prefill_ms));
+	        std::string generated;
+	        size_t prompt_tokens = 0;
+	        size_t completion_tokens = 0;
+	        size_t kv_bytes = 0;
+	        MemSnapshot mem;
+	        {
+	            std::lock_guard<std::mutex> lock(model_mutex);
+	            log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
+	            auto prefill_start = std::chrono::steady_clock::now();
+	            auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
+	            prompt_tokens = (!ctx || ctx->kv_cache.empty()) ? 0u : static_cast<size_t>(ctx->kv_cache[0].first.h);
+	            auto prefill_end = std::chrono::steady_clock::now();
+	            int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
+	            log_event("chat.prefill.done", "id=" + resp_id + " elapsed_ms=" + std::to_string(prefill_ms));
 
             size_t token_count = 0;
             auto gen_start = std::chrono::steady_clock::now();
@@ -1789,13 +1906,18 @@ int main(int argc, char** argv) {
                 generated += sanitize_utf8(token);
                 ++token_count;
             });
-            auto gen_end = std::chrono::steady_clock::now();
-            int64_t gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start).count();
-            log_event("chat.generate.done", "id=" + resp_id +
-                                               " tokens=" + std::to_string(token_count) +
-                                               " output_bytes=" + std::to_string(generated.size()) +
-                                               " elapsed_ms=" + std::to_string(gen_ms));
-        }
+	            auto gen_end = std::chrono::steady_clock::now();
+	            completion_tokens = token_count;
+	            kv_bytes = kv_cache_bytes(ctx);
+	            ctx.reset();
+	            int64_t gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start).count();
+	            log_event("chat.generate.done", "id=" + resp_id +
+	                                               " tokens=" + std::to_string(token_count) +
+	                                               " output_bytes=" + std::to_string(generated.size()) +
+	                                               " elapsed_ms=" + std::to_string(gen_ms));
+	        }
+	        maybe_malloc_trim(opt.malloc_trim);
+	        mem = read_self_mem_snapshot();
 
         json resp = {
             {"id", resp_id},
@@ -1808,11 +1930,16 @@ int main(int argc, char** argv) {
                     {"finish_reason", "stop"}
                 }
             })},
-            {"usage", {{"prompt_tokens", 0}, {"completion_tokens", 0}}},
-            {"rag", rag_payload}
-        };
-        res.set_content(dump_json_safe(resp), "application/json");
-    });
+	            {"usage", {{"prompt_tokens", prompt_tokens},
+	                       {"completion_tokens", completion_tokens},
+	                       {"total_tokens", prompt_tokens + completion_tokens}}},
+	            {"mem", {{"rss_bytes", mem.rss_bytes},
+	                     {"hwm_bytes", mem.hwm_bytes},
+	                     {"kv_cache_bytes", kv_bytes}}},
+	            {"rag", rag_payload}
+	        };
+	        res.set_content(dump_json_safe(resp), "application/json");
+	    });
 
     std::cout << "RAG web app listening on http://0.0.0.0:" << opt.port << "\n";
     std::cout << "POST /v1/chat/completions and open / for the demo UI.\n";
