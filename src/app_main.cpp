@@ -1415,6 +1415,7 @@ int main(int argc, char** argv) {
 
     RagVectorDb rag;
     RagEmbedder embedder(opt.embed_dim);
+    std::mutex rag_mutex;
     std::string rag_err;
     bool rag_ready = rag.open(opt.db_path, opt.embed_dim, &rag_err);
     std::string rag_open_err = rag_err;
@@ -1518,7 +1519,11 @@ int main(int argc, char** argv) {
                                   " query=\"" + truncate_for_log(query, 200) + "\"" +
                                   " top_k=" + std::to_string(top_k));
 
-            json result = rag_tool_call(args, rag, embedder, opt.rag_top_k, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
+            json result;
+            {
+                std::lock_guard<std::mutex> lock(rag_mutex);
+                result = rag_tool_call(args, rag, embedder, opt.rag_top_k, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
+            }
             size_t hit_count = 0;
             if (result.contains("chunks") && result["chunks"].is_array()) {
                 hit_count = result["chunks"].size();
@@ -1584,26 +1589,33 @@ int main(int argc, char** argv) {
         trace.push_back("saved to " + outpath.string());
         size_t doc_id = 0;
         size_t chunks = 0;
-        if (!ingest_document(filename,
-                             ext == ".pdf" ? "application/pdf" : "text/plain",
-                             outpath,
-                             rag,
-                             opt,
-                             &trace,
-                             &doc_id,
-                             &chunks,
-                             &err)) {
-            res.status = 500;
-            res.set_content(dump_json_safe(make_error(500, err)), "application/json");
-            log_event("rag.upload.error", "ingest_failed err=" + err);
-            return;
+        size_t doc_count = 0;
+        size_t chunk_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(rag_mutex);
+            if (!ingest_document(filename,
+                                 ext == ".pdf" ? "application/pdf" : "text/plain",
+                                 outpath,
+                                 rag,
+                                 opt,
+                                 &trace,
+                                 &doc_id,
+                                 &chunks,
+                                 &err)) {
+                res.status = 500;
+                res.set_content(dump_json_safe(make_error(500, err)), "application/json");
+                log_event("rag.upload.error", "ingest_failed err=" + err);
+                return;
+            }
+            doc_count = rag.doc_count();
+            chunk_count = rag.chunk_count();
         }
 
         log_event("rag.upload.done", "filename=" + filename +
                                      " doc_id=" + std::to_string(doc_id) +
                                      " chunks=" + std::to_string(chunks) +
-                                     " doc_count=" + std::to_string(rag.doc_count()) +
-                                     " chunk_count=" + std::to_string(rag.chunk_count()));
+                                     " doc_count=" + std::to_string(doc_count) +
+                                     " chunk_count=" + std::to_string(chunk_count));
 
         json resp = {
             {"ok", true},
@@ -1615,20 +1627,29 @@ int main(int argc, char** argv) {
             }},
             {"trace", trace},
             {"rag", {
-                {"doc_count", rag.doc_count()},
-                {"chunk_count", rag.chunk_count()}
+                {"doc_count", doc_count},
+                {"chunk_count", chunk_count}
             }}
         };
         res.set_content(dump_json_safe(resp), "application/json");
     });
 
     server.Get("/rag/info", [&](const httplib::Request&, httplib::Response& res) {
+        size_t doc_count = 0;
+        size_t chunk_count = 0;
+        int embed_dim = 0;
+        {
+            std::lock_guard<std::mutex> lock(rag_mutex);
+            doc_count = rag.doc_count();
+            chunk_count = rag.chunk_count();
+            embed_dim = rag.embed_dim();
+        }
         json info = {
             {"enabled", opt.rag_enabled && rag_ready},
             {"ready", rag_ready},
-            {"doc_count", rag.doc_count()},
-            {"chunk_count", rag.chunk_count()},
-            {"embed_dim", rag.embed_dim()}
+            {"doc_count", doc_count},
+            {"chunk_count", chunk_count},
+            {"embed_dim", embed_dim}
         };
         if (!rag_ready && !rag_open_err.empty()) info["error"] = rag_open_err;
         res.set_content(dump_json_safe(info), "application/json");
@@ -1648,7 +1669,11 @@ int main(int argc, char** argv) {
                 if (*v > 0) limit = static_cast<size_t>(*v);
             }
         }
-        std::vector<RagDocInfo> docs = rag.list_docs(limit, 0);
+        std::vector<RagDocInfo> docs;
+        {
+            std::lock_guard<std::mutex> lock(rag_mutex);
+            docs = rag.list_docs(limit, 0);
+        }
         json out = {{"docs", json::array()}};
         for (const auto& d : docs) {
             out["docs"].push_back({
@@ -1681,18 +1706,25 @@ int main(int argc, char** argv) {
         }
 
         std::string err;
-        if (!rag.delete_doc(doc_id, &err)) {
-            res.status = 404;
-            res.set_content(dump_json_safe(make_error(404, err)), "application/json");
-            log_event("rag.doc.delete.error", "doc_id=" + std::to_string(doc_id) + " err=" + err);
-            return;
+        size_t doc_count = 0;
+        size_t chunk_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(rag_mutex);
+            if (!rag.delete_doc(doc_id, &err)) {
+                res.status = 404;
+                res.set_content(dump_json_safe(make_error(404, err)), "application/json");
+                log_event("rag.doc.delete.error", "doc_id=" + std::to_string(doc_id) + " err=" + err);
+                return;
+            }
+            doc_count = rag.doc_count();
+            chunk_count = rag.chunk_count();
         }
 
         json out = {
             {"ok", true},
             {"doc_id", doc_id},
-            {"doc_count", rag.doc_count()},
-            {"chunk_count", rag.chunk_count()}
+            {"doc_count", doc_count},
+            {"chunk_count", chunk_count}
         };
         res.set_content(dump_json_safe(out), "application/json");
         log_event("rag.doc.delete", "doc_id=" + std::to_string(doc_id));
@@ -1717,11 +1749,14 @@ int main(int argc, char** argv) {
         std::string filename;
         std::vector<RagSearchHit> chunks;
         std::string err;
-        if (!rag.get_document_chunks(doc_id, &filename, &chunks, &err)) {
-            res.status = 404;
-            res.set_content("document not found", "text/plain; charset=utf-8");
-            log_event("rag.doc.error", "doc_id=" + std::to_string(doc_id) + " err=" + err);
-            return;
+        {
+            std::lock_guard<std::mutex> lock(rag_mutex);
+            if (!rag.get_document_chunks(doc_id, &filename, &chunks, &err)) {
+                res.status = 404;
+                res.set_content("document not found", "text/plain; charset=utf-8");
+                log_event("rag.doc.error", "doc_id=" + std::to_string(doc_id) + " err=" + err);
+                return;
+            }
         }
 
         std::ostringstream html;
@@ -1817,9 +1852,12 @@ int main(int argc, char** argv) {
             rag_trace.push_back("vector search");
             auto t0 = std::chrono::steady_clock::now();
             std::vector<float> qvec = embedder.embed(user_query);
-            hits = rag.search(qvec, rag_top_k);
-            rag_trace.push_back("expand neighbors");
-            expand_hits_with_neighbors(rag, hits, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
+            {
+                std::lock_guard<std::mutex> lock(rag_mutex);
+                hits = rag.search(qvec, rag_top_k);
+                rag_trace.push_back("expand neighbors");
+                expand_hits_with_neighbors(rag, hits, opt.rag_neighbor_chunks, opt.rag_chunk_max_chars);
+            }
             auto t1 = std::chrono::steady_clock::now();
             int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
             log_event("rag.search", "id=" + resp_id +
@@ -1900,11 +1938,18 @@ int main(int argc, char** argv) {
         if (client_rag && body.contains("rag_payload") && body["rag_payload"].is_object()) {
             rag_payload = body["rag_payload"];
         } else {
+            size_t doc_count = 0;
+            size_t chunk_count = 0;
+            {
+                std::lock_guard<std::mutex> lock(rag_mutex);
+                doc_count = rag.doc_count();
+                chunk_count = rag.chunk_count();
+            }
             rag_payload = build_rag_payload(hits,
                                             rag_enabled && rag_ready,
                                             rag_top_k,
-                                            rag.doc_count(),
-                                            rag.chunk_count(),
+                                            doc_count,
+                                            chunk_count,
                                             rag_trace.empty() ? nullptr : &rag_trace,
                                             rag_error.empty() ? nullptr : &rag_error);
         }
