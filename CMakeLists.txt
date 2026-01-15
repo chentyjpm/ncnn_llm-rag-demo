@@ -88,25 +88,15 @@ target_link_libraries(ncnn_llm_rag_app PRIVATE
   Threads::Threads
 )
 
-# Windows: avoid "missing libcrypto-3-x64.dll/libssl-3-x64.dll" at runtime by
-# copying OpenSSL runtime DLLs next to the executable when linking dynamically.
+# Windows: avoid missing runtime DLLs by copying resolved dependencies next to the executable.
 if (WIN32)
-  if (TARGET OpenSSL::Crypto)
-    add_custom_command(TARGET ncnn_llm_rag_app POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              $<TARGET_FILE:OpenSSL::Crypto>
-              $<TARGET_FILE_DIR:ncnn_llm_rag_app>
-      VERBATIM
-    )
-  endif()
-  if (TARGET OpenSSL::SSL)
-    add_custom_command(TARGET ncnn_llm_rag_app POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              $<TARGET_FILE:OpenSSL::SSL>
-              $<TARGET_FILE_DIR:ncnn_llm_rag_app>
-      VERBATIM
-    )
-  endif()
+  add_custom_command(TARGET ncnn_llm_rag_app POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -Dexe=$<TARGET_FILE:ncnn_llm_rag_app>
+            -Ddest=$<TARGET_FILE_DIR:ncnn_llm_rag_app>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/copy_runtime_deps.cmake
+    VERBATIM
+  )
 endif()
 
 # macOS: iconv symbols may require explicit linkage.
