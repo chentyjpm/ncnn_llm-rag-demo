@@ -101,7 +101,7 @@ cmake --build build -j
 Usage: ./build/ncnn_llm_rag_app [options]
   --model PATH      Model directory (default: assets/qwen3_0.6b)
   --docs PATH       Seed docs directory (default: assets/rag)
-  --web PATH        Web root to serve (default: src/web)
+  --web PATH        Web root to serve (default: :embedded:)
   --data PATH       Data directory (default: data)
   --db PATH         SQLite database path (default: data/rag.sqlite)
   --pdf-txt PATH    Exported PDF text directory (default: data/pdf_txt)
@@ -124,6 +124,7 @@ Usage: ./build/ncnn_llm_rag_app [options]
 
 常用参数（可执行程序 `--help` 查看完整说明）：
 - `--model PATH`：模型目录（默认 `assets/qwen3_0.6b`）
+- `--web PATH`：Web 静态资源目录（默认内置 `:embedded:`；如需本地开发可设为 `src/web`）
 - `--db PATH`：SQLite DB（默认 `data/rag.sqlite`）
 - `--pdf-txt PATH`：PDF 导出 txt 目录（默认 `data/pdf_txt`）
 - `--chunk-size N`：切片大小（默认 600）

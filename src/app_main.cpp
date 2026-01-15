@@ -6,6 +6,7 @@
 #include "ncnn_llm_gpt.h"
 #include "util.h"
 #include "utils/prompt.h"
+#include "web_assets_embedded.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -28,6 +29,13 @@
 using nlohmann::json;
 
 namespace {
+
+bool is_embedded_web_root(const std::string& web_root) {
+    if (web_root.empty()) return true;
+    if (web_root == "embedded") return true;
+    if (web_root == ":embedded:") return true;
+    return false;
+}
 
 std::string sanitize_for_log(const std::string& s) {
     std::string out;
@@ -318,7 +326,7 @@ std::string escape_html(const std::string& s) {
 
 struct AppOptions {
     std::string model_path = "assets/qwen3_0.6b";
-    std::string web_root = "src/web";
+    std::string web_root = ":embedded:";
     std::string docs_path = "assets/rag";
     std::string data_dir = "data";
     std::string db_path = "data/rag.sqlite";
@@ -339,7 +347,7 @@ void print_usage(const char* argv0) {
     std::cout << "Usage: " << argv0 << " [options]\n"
               << "  --model PATH      Model directory (default: assets/qwen3_0.6b)\n"
               << "  --docs PATH       Seed docs directory (default: assets/rag)\n"
-              << "  --web PATH        Web root to serve (default: src/web)\n"
+              << "  --web PATH        Web root to serve (default: :embedded:)\n"
               << "  --data PATH       Data directory (default: data)\n"
               << "  --db PATH         SQLite database path (default: data/rag.sqlite)\n"
               << "  --pdf-txt PATH    Exported PDF text directory (default: data/pdf_txt)\n"
@@ -837,8 +845,27 @@ int main(int argc, char** argv) {
     std::mutex model_mutex;
 
     httplib::Server server;
-    if (!server.set_mount_point("/", opt.web_root.c_str())) {
-        std::cerr << "Warning: failed to mount web root at " << opt.web_root << "\n";
+    bool mounted_web_root = false;
+    if (!is_embedded_web_root(opt.web_root)) {
+        mounted_web_root = server.set_mount_point("/", opt.web_root.c_str());
+        if (!mounted_web_root) {
+            std::cerr << "Warning: failed to mount web root at " << opt.web_root << " (fallback to embedded)\n";
+        }
+    }
+    if (!mounted_web_root) {
+        auto serve_embedded = [&](const httplib::Request& req, httplib::Response& res) {
+            ncnn_llm_rag_demo_web::AssetView asset;
+            if (!ncnn_llm_rag_demo_web::get(req.path, &asset)) {
+                res.status = 404;
+                res.set_content("Not Found", "text/plain");
+                return;
+            }
+            res.set_content(std::string(reinterpret_cast<const char*>(asset.data), asset.size), asset.mime);
+        };
+        server.Get("/", serve_embedded);
+        server.Get("/index.html", serve_embedded);
+        server.Get("/app.js", serve_embedded);
+        server.Get("/styles.css", serve_embedded);
     }
 
     server.Get("/mcp/tools/list", [&](const httplib::Request&, httplib::Response& res) {

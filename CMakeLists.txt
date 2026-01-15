@@ -8,6 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 include(CheckCXXSourceCompiles)
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
 FetchContent_Declare(
   nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
@@ -44,8 +46,30 @@ add_executable(ncnn_llm_rag_app
   ncnn_llm/examples/llm_ncnn_run/util.cpp
 )
 
+file(GLOB NCNN_RAG_WEB_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/web/*")
+set(NCNN_RAG_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(NCNN_RAG_WEB_EMBED_CPP "${NCNN_RAG_GENERATED_DIR}/web_assets_embedded.cpp")
+set(NCNN_RAG_WEB_EMBED_H "${NCNN_RAG_GENERATED_DIR}/web_assets_embedded.h")
+
+add_custom_command(
+  OUTPUT "${NCNN_RAG_WEB_EMBED_CPP}" "${NCNN_RAG_WEB_EMBED_H}"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${NCNN_RAG_GENERATED_DIR}"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_web_assets.py"
+          --input-dir "${CMAKE_CURRENT_SOURCE_DIR}/src/web"
+          --out-cpp "${NCNN_RAG_WEB_EMBED_CPP}"
+          --out-h "${NCNN_RAG_WEB_EMBED_H}"
+  DEPENDS ${NCNN_RAG_WEB_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_web_assets.py"
+  VERBATIM
+)
+
+add_custom_target(ncnn_rag_web_assets DEPENDS "${NCNN_RAG_WEB_EMBED_CPP}" "${NCNN_RAG_WEB_EMBED_H}")
+add_dependencies(ncnn_llm_rag_app ncnn_rag_web_assets)
+target_sources(ncnn_llm_rag_app PRIVATE "${NCNN_RAG_WEB_EMBED_CPP}" "${NCNN_RAG_WEB_EMBED_H}")
+
 target_include_directories(ncnn_llm_rag_app PRIVATE
   src
+  "${NCNN_RAG_GENERATED_DIR}"
   third_party/sqlite/sqlite-amalgamation-3510200
   ncnn_llm/src
   ncnn_llm/examples/llm_ncnn_run
