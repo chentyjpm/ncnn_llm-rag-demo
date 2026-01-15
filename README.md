@@ -16,7 +16,10 @@
 
 - 提供一个可离线运行的 RAG Web 应用：上传 PDF/TXT → 建库 → 检索 → 结合 LLM 回答
 
+![demo](img/2.png)
+
 ![demo](img/demo.png)
+
 
 ## 当前实现
 
