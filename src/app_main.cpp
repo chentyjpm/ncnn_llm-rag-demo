@@ -1607,38 +1607,70 @@ int main(int argc, char** argv) {
 
         log_event("rag.upload", "filename=" + filename + " size=" + std::to_string(file.content.size()));
 
-        std::string stored = std::to_string(now_ms_epoch()) + "_" + sanitize_filename(filename);
-        std::filesystem::path outpath = upload_dir / path_from_utf8(stored);
-
-        std::string err;
-        if (!write_file(outpath, file.content, &err)) {
-            res.status = 500;
-            res.set_content(dump_json_safe(make_error(500, err)), "application/json");
-            log_event("rag.upload.error", "write_failed err=" + err);
-            return;
-        }
-
-        std::vector<std::string> trace;
-        trace.push_back("saved to " + outpath.string());
         size_t doc_id = 0;
         size_t chunks = 0;
         size_t doc_count = 0;
         size_t chunk_count = 0;
+        std::string err;
+        std::vector<std::string> trace;
+
         {
             std::lock_guard<std::mutex> lock(rag_mutex);
-            if (!ingest_document(filename,
-                                 ext == ".pdf" ? "application/pdf" : "text/plain",
-                                 outpath,
-                                 rag,
-                                 opt,
-                                 &trace,
-                                 &doc_id,
-                                 &chunks,
-                                 &err)) {
-                res.status = 500;
-                res.set_content(dump_json_safe(make_error(500, err)), "application/json");
-                log_event("rag.upload.error", "ingest_failed err=" + err);
-                return;
+            if (ext == ".txt") {
+                trace.push_back("read content (in-memory)");
+                std::string text = file.content;
+                std::string norm_err;
+                if (!normalize_utf8(&text, &norm_err)) {
+                    res.status = 500;
+                    res.set_content(dump_json_safe(make_error(500, norm_err)), "application/json");
+                    log_event("rag.upload.error", "normalize_failed err=" + norm_err);
+                    return;
+                }
+                text = trim_text(text);
+                if (text.empty()) {
+                    res.status = 500;
+                    res.set_content(dump_json_safe(make_error(500, "empty text file")), "application/json");
+                    log_event("rag.upload.error", "empty_text");
+                    return;
+                }
+                trace.push_back("add document");
+                if (!rag.add_document(filename, "text/plain", text, opt.chunk_size, &err, &doc_id, &chunks)) {
+                    res.status = 500;
+                    res.set_content(dump_json_safe(make_error(500, err)), "application/json");
+                    log_event("rag.upload.error", "add_doc_failed err=" + err);
+                    return;
+                }
+            } else {
+                std::string base = std::to_string(now_ms_epoch());
+                std::string stored = base + ext;
+                std::filesystem::path outpath = upload_dir / path_from_utf8(stored);
+                std::error_code exists_ec;
+                for (int i = 1; std::filesystem::exists(outpath, exists_ec) && i < 1000; ++i) {
+                    outpath = upload_dir / path_from_utf8(base + "_" + std::to_string(i) + ext);
+                }
+
+                if (!write_file(outpath, file.content, &err)) {
+                    res.status = 500;
+                    res.set_content(dump_json_safe(make_error(500, err)), "application/json");
+                    log_event("rag.upload.error", "write_failed err=" + err);
+                    return;
+                }
+                trace.push_back("saved to " + outpath.string());
+
+                if (!ingest_document(filename,
+                                     "application/pdf",
+                                     outpath,
+                                     rag,
+                                     opt,
+                                     &trace,
+                                     &doc_id,
+                                     &chunks,
+                                     &err)) {
+                    res.status = 500;
+                    res.set_content(dump_json_safe(make_error(500, err)), "application/json");
+                    log_event("rag.upload.error", "ingest_failed err=" + err);
+                    return;
+                }
             }
             doc_count = rag.doc_count();
             chunk_count = rag.chunk_count();
