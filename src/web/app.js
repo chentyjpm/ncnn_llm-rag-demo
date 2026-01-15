@@ -357,6 +357,60 @@ async function fetchDocsList() {
   }
 }
 
+function hasUtf8Bom(bytes) {
+  return bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+}
+
+function hasUtf16LeBom(bytes) {
+  return bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
+}
+
+function hasUtf16BeBom(bytes) {
+  return bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff;
+}
+
+function decodeText(bytes, encoding, fatal = false, ignoreBOM = true) {
+  const dec = new TextDecoder(encoding, { fatal, ignoreBOM });
+  return dec.decode(bytes);
+}
+
+async function transcodeTxtToUtf8File(file) {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+
+  let text = '';
+  let encoding = 'utf-8';
+
+  try {
+    if (hasUtf16LeBom(bytes)) {
+      encoding = 'utf-16le';
+      text = decodeText(bytes.subarray(2), encoding);
+    } else if (hasUtf16BeBom(bytes)) {
+      encoding = 'utf-16be';
+      text = decodeText(bytes.subarray(2), encoding);
+    } else if (hasUtf8Bom(bytes)) {
+      encoding = 'utf-8';
+      text = decodeText(bytes.subarray(3), encoding);
+    } else {
+      encoding = 'utf-8';
+      text = decodeText(bytes, encoding, true);
+    }
+  } catch (_) {
+    // Best-effort fallback for common Windows/Chinese encodings.
+    try {
+      encoding = 'gb18030';
+      text = decodeText(bytes, encoding);
+    } catch (e2) {
+      throw new Error(`无法识别 txt 编码（浏览器不支持转码）：${e2.message || e2}`);
+    }
+  }
+
+  text = text.replace(/\r\n/g, '\n');
+  const utf8Bytes = new TextEncoder().encode(text);
+  const blob = new Blob([utf8Bytes], { type: 'text/plain;charset=utf-8' });
+  return { file: new File([blob], file.name || 'upload.txt', { type: blob.type }), encoding };
+}
+
 async function fetchMcpTools() {
   try {
     const resp = await fetch('/mcp/tools/list');
@@ -559,7 +613,20 @@ uploadForm.addEventListener('submit', async (e) => {
 
   try {
     const formData = new FormData();
-    formData.append('file', file);
+    const lower = (file.name || '').toLowerCase();
+    const isTxt = lower.endsWith('.txt') || (file.type || '').startsWith('text/');
+    if (isTxt) {
+      logProcess('读取 txt 并转为 UTF-8...', true);
+      const { file: utf8File, encoding } = await transcodeTxtToUtf8File(file);
+      if (encoding && encoding !== 'utf-8') {
+        logProcess(`检测到编码：${encoding}（已转为 UTF-8）`, true);
+      } else {
+        logProcess('编码：UTF-8', true);
+      }
+      formData.append('file', utf8File);
+    } else {
+      formData.append('file', file);
+    }
     const resp = await fetch('/rag/upload', { method: 'POST', body: formData });
     if (!resp.ok) {
       const msg = await resp.text();
