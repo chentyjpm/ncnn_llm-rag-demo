@@ -100,6 +100,11 @@ cmake --build build -j
 ```text
 Usage: ./build/ncnn_llm_rag_app [options]
   --model PATH      Model directory (default: assets/qwen3_0.6b)
+  --model-url URL   Model download base URL (default: https://mirrors.sdu.edu.cn/ncnn_modelzoo/qwen3_0.6b/)
+  --model-dl-connect-timeout N  Connect timeout in seconds (default: 15)
+  --model-dl-stall-timeout N    Abort if transfer stalls for N seconds (default: 60)
+  --model-dl-timeout N          Overall timeout per file (0=disable, default: 0)
+  --no-model-dl-proxy           Disable download proxy
   --docs PATH       Seed docs directory (default: assets/rag)
   --web PATH        Web root to serve (default: :embedded:)
   --data PATH       Data directory (default: data)
@@ -112,6 +117,7 @@ Usage: ./build/ncnn_llm_rag_app [options]
   --rag-neighbors N Include neighbor chunks around each hit (default: 1)
   --rag-chunk-max N Max chars per returned chunk after expansion (default: 1800)
   --prefill-chunk-bytes N Chunk prompt for prefill to reduce memory (default: 2048)
+  --no-model-download Disable automatic model download
   --no-rag          Disable retrieval
   --no-pdf-txt      Disable exporting extracted PDF text
   --vulkan          Enable Vulkan compute
@@ -124,6 +130,9 @@ Usage: ./build/ncnn_llm_rag_app [options]
 
 常用参数（可执行程序 `--help` 查看完整说明）：
 - `--model PATH`：模型目录（默认 `assets/qwen3_0.6b`）
+- `--model-url URL`：模型下载地址（默认 `https://mirrors.sdu.edu.cn/ncnn_modelzoo/qwen3_0.6b/`，当模型缺失/不完整时会自动下载）
+- `--model-dl-stall-timeout N`：下载卡住超时（默认 60 秒，避免网络异常时一直等待）
+- `--no-model-download`：禁用自动下载（离线环境建议打开）
 - `--web PATH`：Web 静态资源目录（默认内置 `:embedded:`；如需本地开发可设为 `src/web`）
 - `--db PATH`：SQLite DB（默认 `data/rag.sqlite`）
 - `--pdf-txt PATH`：PDF 导出 txt 目录（默认 `data/pdf_txt`）

@@ -10,6 +10,20 @@ include(CheckCXXSourceCompiles)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+option(NCNN_RAG_FETCH_USE_PROXY "Use proxy for CMake FetchContent downloads" ON)
+set(NCNN_RAG_FETCH_PROXY "192.168.8.3:18080" CACHE STRING "Proxy (HOST:PORT or URL) for CMake FetchContent downloads")
+if (NCNN_RAG_FETCH_USE_PROXY)
+  set(_proxy "${NCNN_RAG_FETCH_PROXY}")
+  if (NOT _proxy MATCHES "^[a-zA-Z][a-zA-Z0-9+.-]*://")
+    set(_proxy "http://${_proxy}")
+  endif()
+  set(ENV{http_proxy}  "${_proxy}")
+  set(ENV{https_proxy} "${_proxy}")
+  set(ENV{HTTP_PROXY}  "${_proxy}")
+  set(ENV{HTTPS_PROXY} "${_proxy}")
+  set(ENV{ALL_PROXY}   "${_proxy}")
+endif()
+
 FetchContent_Declare(
   nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
@@ -30,6 +44,10 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
+
+# Enable HTTPS client for cpp-httplib (for model auto-download).
+set(OPENSSL_USE_STATIC_LIBS TRUE)
+find_package(OpenSSL REQUIRED)
 
 add_executable(ncnn_llm_rag_app
   src/app_main.cpp
@@ -79,6 +97,8 @@ target_link_libraries(ncnn_llm_rag_app PRIVATE
   ${NCNN_TARGET}
   nlohmann_json::nlohmann_json
   httplib::httplib
+  OpenSSL::SSL
+  OpenSSL::Crypto
   Threads::Threads
 )
 
@@ -87,13 +107,7 @@ if (WIN32)
   target_compile_definitions(ncnn_llm_rag_app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
-# Ensure cpp-httplib builds in HTTP-only mode (no OpenSSL runtime dependency like libssl-3-x64.dll).
-# Some environments may inject CPPHTTPLIB_OPENSSL_SUPPORT via global compiler flags.
-if (MSVC)
-  target_compile_options(ncnn_llm_rag_app PRIVATE /UCPPHTTPLIB_OPENSSL_SUPPORT)
-else()
-  target_compile_options(ncnn_llm_rag_app PRIVATE -UCPPHTTPLIB_OPENSSL_SUPPORT)
-endif()
+target_compile_definitions(ncnn_llm_rag_app PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # Workaround for some ncnn CMake packages that export include dir as ".../include/ncnn".
 # Our code uses "<ncnn/*.h>", which requires adding the parent include dir as well.

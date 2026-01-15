@@ -25,6 +25,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 using nlohmann::json;
 
@@ -35,6 +36,312 @@ bool is_embedded_web_root(const std::string& web_root) {
     if (web_root == "embedded") return true;
     if (web_root == ":embedded:") return true;
     return false;
+}
+
+struct HttpUrlParts {
+    std::string scheme;
+    std::string host;
+    int port = 80;
+    std::string base_path;
+};
+
+bool parse_url_base(const std::string& url_in, HttpUrlParts* out, std::string* err) {
+    if (!out) return false;
+    auto pos = url_in.find("://");
+    if (pos == std::string::npos) {
+        if (err) *err = "missing scheme";
+        return false;
+    }
+    std::string scheme = url_in.substr(0, pos);
+    std::string rest = url_in.substr(pos + 3);
+    if (scheme != "http" && scheme != "https") {
+        if (err) *err = "unsupported scheme: " + scheme;
+        return false;
+    }
+
+    std::string host_port;
+    std::string path = "/";
+    auto slash = rest.find('/');
+    if (slash == std::string::npos) {
+        host_port = rest;
+    } else {
+        host_port = rest.substr(0, slash);
+        path = rest.substr(slash);
+    }
+
+    std::string host = host_port;
+    int port = (scheme == "https") ? 443 : 80;
+    auto colon = host_port.rfind(':');
+    if (colon != std::string::npos && colon + 1 < host_port.size()) {
+        bool all_digits = true;
+        for (size_t i = colon + 1; i < host_port.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(host_port[i]))) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (all_digits) {
+            host = host_port.substr(0, colon);
+            port = std::atoi(host_port.substr(colon + 1).c_str());
+            if (port <= 0) port = (scheme == "https") ? 443 : 80;
+        }
+    }
+
+    if (host.empty()) {
+        if (err) *err = "missing host";
+        return false;
+    }
+    if (path.empty()) path = "/";
+    if (path.back() != '/') path.push_back('/');
+
+    out->scheme = scheme;
+    out->host = host;
+    out->port = port;
+    out->base_path = path;
+    return true;
+}
+
+bool parse_host_port(const std::string& in, std::string* host, int* port, std::string* err) {
+    if (!host || !port) return false;
+    auto pos = in.rfind(':');
+    if (pos == std::string::npos || pos == 0 || pos + 1 >= in.size()) {
+        if (err) *err = "expected HOST:PORT";
+        return false;
+    }
+    std::string h = in.substr(0, pos);
+    std::string p = in.substr(pos + 1);
+    for (char c : p) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) {
+            if (err) *err = "invalid port";
+            return false;
+        }
+    }
+    int v = std::atoi(p.c_str());
+    if (v <= 0 || v > 65535) {
+        if (err) *err = "port out of range";
+        return false;
+    }
+    *host = h;
+    *port = v;
+    return true;
+}
+
+bool file_exists_nonempty(const std::filesystem::path& p) {
+    std::error_code ec;
+    if (!std::filesystem::exists(p, ec)) return false;
+    auto sz = std::filesystem::file_size(p, ec);
+    if (ec) return false;
+    return sz > 0;
+}
+
+std::vector<std::string> expected_model_files_from_config(const std::filesystem::path& model_dir, std::string* err) {
+    std::ifstream ifs((model_dir / "model.json").string());
+    if (!ifs) {
+        if (err) *err = "missing model.json";
+        return {};
+    }
+    json config;
+    try {
+        ifs >> config;
+    } catch (const std::exception& e) {
+        if (err) *err = std::string("parse model.json: ") + e.what();
+        return {};
+    }
+
+    std::unordered_set<std::string> uniq;
+    uniq.insert("model.json");
+    try {
+        auto params = config.at("params");
+        uniq.insert(params.at("decoder_param").get<std::string>());
+        uniq.insert(params.at("decoder_bin").get<std::string>());
+        uniq.insert(params.at("embed_token_param").get<std::string>());
+        uniq.insert(params.at("embed_token_bin").get<std::string>());
+        uniq.insert(params.at("proj_out_param").get<std::string>());
+        uniq.insert(params.at("proj_out_bin").get<std::string>());
+        auto tok = config.at("tokenizer");
+        uniq.insert(tok.at("vocab_file").get<std::string>());
+        uniq.insert(tok.at("merges_file").get<std::string>());
+    } catch (const std::exception& e) {
+        if (err) *err = std::string("model.json missing fields: ") + e.what();
+        return {};
+    }
+
+    std::vector<std::string> files;
+    files.reserve(uniq.size());
+    for (const auto& s : uniq) files.push_back(s);
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+bool is_model_complete(const std::filesystem::path& model_dir, std::vector<std::string>* missing_files, std::string* err) {
+    if (!std::filesystem::is_directory(model_dir)) {
+        if (missing_files) missing_files->push_back("model.json");
+        if (err) *err = "model dir not found: " + model_dir.string();
+        return false;
+    }
+    if (!file_exists_nonempty(model_dir / "model.json")) {
+        if (missing_files) missing_files->push_back("model.json");
+        if (err) *err = "model.json missing";
+        return false;
+    }
+
+    std::string parse_err;
+    auto expected = expected_model_files_from_config(model_dir, &parse_err);
+    if (expected.empty()) {
+        if (missing_files) missing_files->push_back("model.json");
+        if (err) *err = parse_err.empty() ? "invalid model.json" : parse_err;
+        return false;
+    }
+
+    bool ok = true;
+    if (missing_files) missing_files->clear();
+    for (const auto& rel : expected) {
+        auto p = model_dir / rel;
+        if (!file_exists_nonempty(p)) {
+            ok = false;
+            if (missing_files) missing_files->push_back(rel);
+        }
+    }
+    if (!ok && err) *err = "missing or empty model files";
+    return ok;
+}
+
+struct CurlDownloadOptions {
+    long connect_timeout_sec = 15;
+    long stall_timeout_sec = 60;
+    long stall_min_bytes_per_sec = 1;
+    long total_timeout_sec = 0; // 0 = no overall timeout (avoid breaking large model downloads)
+    std::string proxy_host;
+    int proxy_port = 0;
+};
+
+template <typename ClientT>
+bool download_file_with_httplib(ClientT& cli,
+                                const std::string& remote_path,
+                                const std::filesystem::path& local_path,
+                                std::string* err) {
+    std::filesystem::create_directories(local_path.parent_path());
+    std::filesystem::path tmp = local_path;
+    tmp += ".part";
+
+    std::ofstream ofs(tmp, std::ios::binary);
+    if (!ofs) {
+        if (err) *err = "open temp file failed: " + tmp.string();
+        return false;
+    }
+
+    bool write_ok = true;
+    auto res = cli.Get(remote_path, [&](const char* data, size_t data_length) {
+        if (!write_ok) return false;
+        ofs.write(data, static_cast<std::streamsize>(data_length));
+        if (!ofs) {
+            write_ok = false;
+            return false;
+        }
+        return true;
+    });
+
+    ofs.close();
+    if (!res) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        if (err) *err = "http request failed: " + remote_path;
+        return false;
+    }
+    if (res->status != 200) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        if (err) *err = "http status " + std::to_string(res->status) + " for " + remote_path;
+        return false;
+    }
+    if (!write_ok) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        if (err) *err = "write failed: " + tmp.string();
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(tmp, local_path, ec);
+    if (ec) {
+        std::filesystem::remove(local_path, ec);
+        ec.clear();
+        std::filesystem::rename(tmp, local_path, ec);
+    }
+    if (ec) {
+        if (err) *err = "rename failed: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool download_url_to_file(const HttpUrlParts& base,
+                          const std::string& rel,
+                          const std::filesystem::path& local_path,
+                          const CurlDownloadOptions& opt,
+                          std::string* err) {
+    std::string remote_path = base.base_path + rel;
+    if (base.scheme == "https") {
+        httplib::SSLClient cli(base.host, base.port);
+        cli.set_follow_location(true);
+        cli.set_connection_timeout(static_cast<int>(opt.connect_timeout_sec));
+        cli.set_read_timeout(static_cast<int>(opt.stall_timeout_sec));
+        if (!opt.proxy_host.empty() && opt.proxy_port > 0) {
+            cli.set_proxy(opt.proxy_host, opt.proxy_port);
+        }
+        // If you are behind a proxy doing TLS interception, you may need to disable verification or set custom CA.
+        cli.enable_server_certificate_verification(true);
+        return download_file_with_httplib(cli, remote_path, local_path, err);
+    } else {
+        httplib::Client cli(base.host, base.port);
+        cli.set_follow_location(true);
+        cli.set_connection_timeout(static_cast<int>(opt.connect_timeout_sec));
+        cli.set_read_timeout(static_cast<int>(opt.stall_timeout_sec));
+        if (!opt.proxy_host.empty() && opt.proxy_port > 0) {
+            cli.set_proxy(opt.proxy_host, opt.proxy_port);
+        }
+        return download_file_with_httplib(cli, remote_path, local_path, err);
+    }
+}
+
+bool ensure_model_downloaded(const std::filesystem::path& model_dir,
+                             const std::string& model_url,
+                             const CurlDownloadOptions& dlopt,
+                             std::string* err) {
+    HttpUrlParts base;
+    std::string parse_err;
+    if (!parse_url_base(model_url, &base, &parse_err)) {
+        if (err) *err = "invalid model url: " + parse_err;
+        return false;
+    }
+
+    // Ensure model.json exists first (so we can infer the rest of required files).
+    if (!file_exists_nonempty(model_dir / "model.json")) {
+        std::string dl_err;
+        if (!download_url_to_file(base, "model.json", model_dir / "model.json", dlopt, &dl_err)) {
+            if (err) *err = "download model.json failed: " + dl_err;
+            return false;
+        }
+    }
+
+    std::string cfg_err;
+    auto expected = expected_model_files_from_config(model_dir, &cfg_err);
+    if (expected.empty()) {
+        if (err) *err = "invalid downloaded model.json: " + cfg_err;
+        return false;
+    }
+
+    for (const auto& rel : expected) {
+        if (rel == "model.json") continue;
+        auto local = model_dir / rel;
+        if (file_exists_nonempty(local)) continue;
+        std::string dl_err;
+        if (!download_url_to_file(base, rel, local, dlopt, &dl_err)) {
+            if (err) *err = "download failed: " + rel + " (" + dl_err + ")";
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string sanitize_for_log(const std::string& s) {
@@ -326,6 +633,7 @@ std::string escape_html(const std::string& s) {
 
 struct AppOptions {
     std::string model_path = "assets/qwen3_0.6b";
+    std::string model_url = "https://mirrors.sdu.edu.cn/ncnn_modelzoo/qwen3_0.6b/";
     std::string web_root = ":embedded:";
     std::string docs_path = "assets/rag";
     std::string data_dir = "data";
@@ -341,11 +649,23 @@ struct AppOptions {
     size_t rag_chunk_max_chars = 1800;
     size_t llm_prefill_chunk_bytes = 2048;
     bool save_pdf_txt = true;
+    bool auto_download_model = true;
+    int model_download_connect_timeout_sec = 15;
+    int model_download_stall_timeout_sec = 60;
+    int model_download_total_timeout_sec = 0; // 0 = no overall timeout
+    bool model_download_use_proxy = false;
+    std::string model_download_proxy = "";
 };
 
 void print_usage(const char* argv0) {
     std::cout << "Usage: " << argv0 << " [options]\n"
               << "  --model PATH      Model directory (default: assets/qwen3_0.6b)\n"
+              << "  --model-url URL   Model download base URL (default: https://mirrors.sdu.edu.cn/ncnn_modelzoo/qwen3_0.6b/)\n"
+              << "  --model-dl-connect-timeout N  Connect timeout in seconds (default: 15)\n"
+              << "  --model-dl-stall-timeout N    Abort if transfer stalls for N seconds (default: 60)\n"
+              << "  --model-dl-timeout N          Overall timeout per file (0=disable, default: 0)\n"
+              << "  --model-dl-proxy HOST:PORT    Use HTTP proxy for downloads (default: none)\n"
+              << "  --no-model-dl-proxy           Disable download proxy\n"
               << "  --docs PATH       Seed docs directory (default: assets/rag)\n"
               << "  --web PATH        Web root to serve (default: :embedded:)\n"
               << "  --data PATH       Data directory (default: data)\n"
@@ -358,6 +678,7 @@ void print_usage(const char* argv0) {
               << "  --rag-neighbors N Include neighbor chunks around each hit (default: 1)\n"
               << "  --rag-chunk-max N Max chars per returned chunk after expansion (default: 1800)\n"
               << "  --prefill-chunk-bytes N Chunk prompt for prefill to reduce memory (default: 2048)\n"
+              << "  --no-model-download Disable automatic model download\n"
               << "  --no-rag          Disable retrieval\n"
               << "  --no-pdf-txt      Disable exporting extracted PDF text\n"
               << "  --vulkan          Enable Vulkan compute\n"
@@ -373,6 +694,19 @@ AppOptions parse_options(int argc, char** argv) {
             std::exit(0);
         } else if (arg == "--model" && i + 1 < argc) {
             opt.model_path = argv[++i];
+        } else if (arg == "--model-url" && i + 1 < argc) {
+            opt.model_url = argv[++i];
+        } else if (arg == "--model-dl-connect-timeout" && i + 1 < argc) {
+            if (auto v = parse_int(argv[++i])) opt.model_download_connect_timeout_sec = std::max(1, *v);
+        } else if (arg == "--model-dl-stall-timeout" && i + 1 < argc) {
+            if (auto v = parse_int(argv[++i])) opt.model_download_stall_timeout_sec = std::max(1, *v);
+        } else if (arg == "--model-dl-timeout" && i + 1 < argc) {
+            if (auto v = parse_int(argv[++i])) opt.model_download_total_timeout_sec = std::max(0, *v);
+        } else if (arg == "--model-dl-proxy" && i + 1 < argc) {
+            opt.model_download_proxy = argv[++i];
+            opt.model_download_use_proxy = true;
+        } else if (arg == "--no-model-dl-proxy") {
+            opt.model_download_use_proxy = false;
         } else if (arg == "--docs" && i + 1 < argc) {
             opt.docs_path = argv[++i];
         } else if (arg == "--web" && i + 1 < argc) {
@@ -399,6 +733,8 @@ AppOptions parse_options(int argc, char** argv) {
             if (auto v = parse_int(argv[++i])) {
                 if (*v > 0) opt.llm_prefill_chunk_bytes = static_cast<size_t>(*v);
             }
+        } else if (arg == "--no-model-download") {
+            opt.auto_download_model = false;
         } else if (arg == "--no-rag") {
             opt.rag_enabled = false;
         } else if (arg == "--no-pdf-txt") {
@@ -767,6 +1103,51 @@ int main(int argc, char** argv) {
     opt.db_path = normalize_path(opt.db_path, opt.data_dir);
     opt.pdf_txt_dir = normalize_path(opt.pdf_txt_dir, opt.data_dir);
 
+    {
+        std::vector<std::string> missing;
+        std::string model_err;
+        if (!is_model_complete(opt.model_path, &missing, &model_err)) {
+            if (opt.auto_download_model) {
+                log_event("model.download", "needed=1 model_path=" + opt.model_path +
+                                               " url=" + opt.model_url +
+                                               " missing_files=" + std::to_string(missing.size()));
+                std::string dl_err;
+                CurlDownloadOptions dlopt;
+                dlopt.connect_timeout_sec = std::max(1, opt.model_download_connect_timeout_sec);
+                dlopt.stall_timeout_sec = std::max(1, opt.model_download_stall_timeout_sec);
+                dlopt.total_timeout_sec = std::max(0, opt.model_download_total_timeout_sec);
+                if (opt.model_download_use_proxy) {
+                    std::string proxy_host;
+                    int proxy_port = 0;
+                    std::string proxy_err;
+                    if (!parse_host_port(opt.model_download_proxy, &proxy_host, &proxy_port, &proxy_err)) {
+                        std::cerr << "Invalid proxy '" << opt.model_download_proxy << "': " << proxy_err << "\n";
+                        return 2;
+                    }
+                    dlopt.proxy_host = proxy_host;
+                    dlopt.proxy_port = proxy_port;
+                }
+                if (!ensure_model_downloaded(opt.model_path, opt.model_url, dlopt, &dl_err)) {
+                    std::cerr << "Model download failed: " << dl_err << "\n";
+                    log_event("model.download.error", dl_err);
+                    return 2;
+                }
+                missing.clear();
+                model_err.clear();
+                if (!is_model_complete(opt.model_path, &missing, &model_err)) {
+                    std::cerr << "Model is still incomplete after download: " << model_err << "\n";
+                    log_event("model.download.error", "incomplete_after_download missing=" + std::to_string(missing.size()));
+                    return 2;
+                }
+                log_event("model.download.done", "ok=1 model_path=" + opt.model_path);
+            } else {
+                std::cerr << "Model not found or incomplete at " << opt.model_path << " (" << model_err << ")\n";
+                std::cerr << "Tip: remove --no-model-download, or pass --model to a complete model dir.\n";
+                return 2;
+            }
+        }
+    }
+
     bool use_vulkan_runtime = opt.use_vulkan;
 #if defined(NCNN_RAG_HAS_VULKAN_API) && NCNN_RAG_HAS_VULKAN_API
     if (opt.use_vulkan) {
@@ -787,6 +1168,12 @@ int main(int argc, char** argv) {
 #endif
 
     log_event("startup", "model_path=" + opt.model_path +
+                         " model_url=" + opt.model_url +
+                         " auto_model_download=" + std::string(opt.auto_download_model ? "1" : "0") +
+                         " model_dl_connect_timeout=" + std::to_string(opt.model_download_connect_timeout_sec) +
+                         " model_dl_stall_timeout=" + std::to_string(opt.model_download_stall_timeout_sec) +
+                         " model_dl_timeout=" + std::to_string(opt.model_download_total_timeout_sec) +
+                         " model_dl_proxy=" + std::string(opt.model_download_use_proxy ? opt.model_download_proxy : "disabled") +
                          " docs_path=" + opt.docs_path +
                          " web_root=" + opt.web_root +
                          " data_dir=" + opt.data_dir +
