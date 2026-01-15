@@ -34,11 +34,13 @@
       </section>
 
       <aside class="rag-panel">
-        <section class="panel card rag-results">
-          <h2>检索片段</h2>
-          <p class="status" id="ragStatus">索引状态：读取中...</p>
-          <div id="ragProcess" class="process"></div>
-          <div id="sources" class="sources"></div>
+        <section class="panel card upload">
+          <h2>上传文档</h2>
+          <form id="uploadForm" class="upload-form">
+            <input id="uploadFile" type="file" accept=".txt,.pdf,application/pdf,text/plain">
+            <button id="uploadBtn" type="submit">上传并索引</button>
+          </form>
+          <p class="hint">支持 txt 和可复制文字的 PDF（需要 pdftotext）。</p>
         </section>
 
         <section class="panel card controls">
@@ -69,13 +71,11 @@
           </div>
         </section>
 
-        <section class="panel card upload">
-          <h2>上传文档</h2>
-          <form id="uploadForm" class="upload-form">
-            <input id="uploadFile" type="file" accept=".txt,.pdf,application/pdf,text/plain">
-            <button id="uploadBtn" type="submit">上传并索引</button>
-          </form>
-          <p class="hint">支持 txt 和可复制文字的 PDF（需要 pdftotext）。</p>
+        <section class="panel card rag-results">
+          <h2>检索片段</h2>
+          <p class="status" id="ragStatus">索引状态：读取中...</p>
+          <div id="ragProcess" class="process"></div>
+          <div id="sources" class="sources"></div>
         </section>
 
         <section class="panel card">

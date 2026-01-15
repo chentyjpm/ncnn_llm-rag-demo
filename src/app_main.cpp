@@ -1444,6 +1444,27 @@ int main(int argc, char** argv) {
     // Note: handlers are invoked only after the full request body is received.
     server.set_read_timeout(std::chrono::seconds(120));
     server.set_payload_max_length(256ULL * 1024 * 1024);
+    server.set_exception_handler([&](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
+        try {
+            if (ep) std::rethrow_exception(ep);
+            throw std::runtime_error("unknown exception");
+        } catch (const std::exception& e) {
+            log_event("http.exception", "path=" + req.path + " what=" + std::string(e.what()));
+            res.status = 500;
+            res.set_content(dump_json_safe(make_error(500, std::string("Internal error: ") + e.what())), "application/json");
+        }
+    });
+    server.set_error_handler([&](const httplib::Request& req, httplib::Response& res) {
+        // Prefer JSON errors for API endpoints so the frontend can surface details.
+        if (req.path.rfind("/rag/", 0) == 0 || req.path.rfind("/v1/", 0) == 0 || req.path.rfind("/mcp/", 0) == 0) {
+            if (res.body.empty()) {
+                res.set_content(dump_json_safe(make_error(res.status ? res.status : 500, "Internal Server Error")), "application/json");
+            }
+        }
+    });
+    server.set_logger([&](const httplib::Request& req, const httplib::Response& res) {
+        log_event("http", req.method + " " + req.path + " status=" + std::to_string(res.status));
+    });
     bool mounted_web_root = false;
     if (!is_embedded_web_root(opt.web_root)) {
         mounted_web_root = server.set_mount_point("/", opt.web_root.c_str());
