@@ -1150,9 +1150,20 @@ std::string file_ext_lower(const std::string& name) {
 
 std::string sanitize_filename(std::string s) {
     for (char& c : s) {
-        if (c == '/' || c == '\\' || c == ':' || c == '\0') c = '_';
+        if (c == '/' || c == '\\' || c == ':' || c == '\0' ||
+            c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') {
+            c = '_';
+        }
     }
     return s;
+}
+
+std::filesystem::path path_from_utf8(const std::string& u8) {
+#if defined(_WIN32)
+    return std::filesystem::u8path(u8);
+#else
+    return std::filesystem::path(u8);
+#endif
 }
 
 bool write_text_file_utf8(const std::filesystem::path& path, const std::string& text, std::string* err) {
@@ -1199,12 +1210,12 @@ bool ingest_document(const std::string& filename,
 
     if (trace) trace->push_back("read content");
     if (ext == ".txt") {
-        if (!read_text_file(path.string(), &text, &local_err)) {
+        if (!read_text_file(path, &text, &local_err)) {
             if (err) *err = local_err;
             return false;
         }
     } else if (ext == ".pdf") {
-        if (!extract_pdf_text(path.string(), &text, &local_err)) {
+        if (!extract_pdf_text(path, &text, &local_err)) {
             if (err) *err = local_err;
             return false;
         }
@@ -1596,11 +1607,8 @@ int main(int argc, char** argv) {
 
         log_event("rag.upload", "filename=" + filename + " size=" + std::to_string(file.content.size()));
 
-        std::string stored = std::to_string(now_ms_epoch()) + "_" + filename;
-        for (char& c : stored) {
-            if (c == '/' || c == '\\') c = '_';
-        }
-        std::filesystem::path outpath = upload_dir / stored;
+        std::string stored = std::to_string(now_ms_epoch()) + "_" + sanitize_filename(filename);
+        std::filesystem::path outpath = upload_dir / path_from_utf8(stored);
 
         std::string err;
         if (!write_file(outpath, file.content, &err)) {

@@ -349,7 +349,7 @@ bool normalize_utf8(std::string* s, std::string* err) {
     return false;
 }
 
-bool read_text_file(const std::string& path, std::string* out, std::string* err) {
+bool read_text_file(const fs::path& path, std::string* out, std::string* err) {
     std::ifstream ifs(path, std::ios::in | std::ios::binary);
     if (!ifs) {
         if (err) *err = "failed to open file";
@@ -371,12 +371,12 @@ bool read_text_file(const std::string& path, std::string* out, std::string* err)
     return true;
 }
 
-bool extract_pdf_text(const std::string& path, std::string* out, std::string* err) {
+bool extract_pdf_text(const fs::path& path, std::string* out, std::string* err) {
     if (!command_exists("pdftotext")) {
         if (err) *err = "pdftotext not found; please install poppler-utils";
         return false;
     }
-    std::string cmd = "pdftotext -layout -q -enc UTF-8 " + shell_escape(path) + " -";
+    std::string cmd = "pdftotext -layout -q -enc UTF-8 " + shell_escape(path.string()) + " -";
     FILE* pipe = popen(cmd.c_str(), "r");
     if (!pipe) {
         if (err) *err = "failed to execute pdftotext";
