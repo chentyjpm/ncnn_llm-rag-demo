@@ -656,6 +656,7 @@ bool ingest_document(const std::string& filename,
                      std::string* err) {
     std::string text;
     std::string local_err;
+    std::string normalized_filename = filename;
     std::string ext = file_ext_lower(filename);
 
     if (trace) trace->push_back("read content");
@@ -696,10 +697,19 @@ bool ingest_document(const std::string& filename,
         return false;
     }
 
+    // Ensure source/metadata is valid UTF-8 for web/UI output.
+    {
+        std::string name_err;
+        if (!normalize_utf8(&normalized_filename, &name_err)) {
+            if (trace) trace->push_back("warn: filename not utf8 (" + name_err + ")");
+            normalized_filename = filename;
+        }
+    }
+
     if (trace) trace->push_back("chunk+embed+store");
     size_t doc_id = 0;
     size_t chunk_count = 0;
-    if (!rag.add_document(filename, mime, text, opt.chunk_size, &local_err, &doc_id, &chunk_count)) {
+    if (!rag.add_document(normalized_filename, mime, text, opt.chunk_size, &local_err, &doc_id, &chunk_count)) {
         if (err) *err = local_err;
         return false;
     }
