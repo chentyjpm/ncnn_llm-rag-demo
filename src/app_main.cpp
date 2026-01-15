@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cinttypes>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -30,6 +32,12 @@
 #include <sstream>
 #include <string>
 #include <unordered_set>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 using nlohmann::json;
 
@@ -300,12 +308,88 @@ struct CurlDownloadOptions {
     long total_timeout_sec = 0; // 0 = no overall timeout (avoid breaking large model downloads)
     std::string proxy_host;
     int proxy_port = 0;
+    bool show_progress = true; // TTY-only; ignored in non-interactive output.
+};
+
+bool is_tty_stderr() {
+#if defined(_WIN32)
+    return _isatty(_fileno(stderr)) != 0;
+#else
+    return isatty(fileno(stderr)) != 0;
+#endif
+}
+
+std::string human_bytes(uint64_t bytes) {
+    static const char* units[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    double v = static_cast<double>(bytes);
+    int idx = 0;
+    while (v >= 1024.0 && idx < 4) {
+        v /= 1024.0;
+        ++idx;
+    }
+    char buf[64];
+    if (idx == 0) {
+        std::snprintf(buf, sizeof(buf), "%" PRIu64 " %s", bytes, units[idx]);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.1f %s", v, units[idx]);
+    }
+    return buf;
+}
+
+struct DownloadProgressPrinter {
+    std::string label;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_print = start;
+    uint64_t last_bytes = 0;
+    bool enabled = false;
+
+    explicit DownloadProgressPrinter(std::string label_, bool enabled_)
+        : label(std::move(label_)), enabled(enabled_) {}
+
+    void finish_line() {
+        if (!enabled) return;
+        std::cerr << "\n";
+    }
+
+    bool update(uint64_t current, uint64_t total) {
+        if (!enabled) return true;
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_print < std::chrono::milliseconds(120) && current != total) return true;
+
+        double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(now - start).count();
+        double speed = seconds > 0.0 ? static_cast<double>(current) / seconds : 0.0;
+        int width = 26;
+        std::string bar;
+        bar.reserve(static_cast<size_t>(width));
+        if (total > 0) {
+            double frac = static_cast<double>(current) / static_cast<double>(total);
+            if (frac < 0.0) frac = 0.0;
+            if (frac > 1.0) frac = 1.0;
+            int filled = static_cast<int>(frac * width + 0.5);
+            for (int i = 0; i < width; ++i) bar.push_back(i < filled ? '#' : '.');
+            int pct = static_cast<int>(frac * 100.0 + 0.5);
+            std::cerr << "\rDownloading " << label << " [" << bar << "] " << pct << "% "
+                      << human_bytes(current) << "/" << human_bytes(total)
+                      << " (" << human_bytes(static_cast<uint64_t>(speed)) << "/s)";
+        } else {
+            for (int i = 0; i < width; ++i) bar.push_back('.');
+            std::cerr << "\rDownloading " << label << " [" << bar << "] "
+                      << human_bytes(current)
+                      << " (" << human_bytes(static_cast<uint64_t>(speed)) << "/s)";
+        }
+        std::cerr.flush();
+        last_print = now;
+        last_bytes = current;
+        return true;
+    }
 };
 
 template <typename ClientT>
 bool download_file_with_httplib(ClientT& cli,
                                 const std::string& remote_path,
                                 const std::filesystem::path& local_path,
+                                const std::string& progress_label,
+                                const CurlDownloadOptions& opt,
                                 std::string* err) {
     std::filesystem::create_directories(local_path.parent_path());
     std::filesystem::path tmp = local_path;
@@ -318,17 +402,30 @@ bool download_file_with_httplib(ClientT& cli,
     }
 
     bool write_ok = true;
-    auto res = cli.Get(remote_path, [&](const char* data, size_t data_length) {
+    const bool progress_enabled = opt.show_progress && is_tty_stderr();
+    DownloadProgressPrinter printer(progress_label, progress_enabled);
+    uint64_t downloaded = 0;
+    auto res = cli.Get(
+        remote_path,
+        [&](const char* data, size_t data_length) {
         if (!write_ok) return false;
         ofs.write(data, static_cast<std::streamsize>(data_length));
         if (!ofs) {
             write_ok = false;
             return false;
         }
+        downloaded += static_cast<uint64_t>(data_length);
         return true;
-    });
+        },
+        [&](uint64_t current, uint64_t total) {
+            // Prefer httplib's current/total when available; otherwise fall back to bytes written.
+            uint64_t cur = current ? current : downloaded;
+            return printer.update(cur, total);
+        });
 
     ofs.close();
+    printer.update(downloaded, downloaded);
+    printer.finish_line();
     if (!res) {
         std::error_code ec;
         std::filesystem::remove(tmp, ec);
@@ -366,6 +463,7 @@ bool download_url_to_file(const HttpUrlParts& base,
                           const std::string& rel,
                           const std::filesystem::path& local_path,
                           const CurlDownloadOptions& opt,
+                          const std::string& progress_label,
                           std::string* err) {
     std::string remote_path = base.base_path + rel;
     if (base.scheme == "https") {
@@ -378,7 +476,7 @@ bool download_url_to_file(const HttpUrlParts& base,
         }
         // If you are behind a proxy doing TLS interception, you may need to disable verification or set custom CA.
         cli.enable_server_certificate_verification(true);
-        return download_file_with_httplib(cli, remote_path, local_path, err);
+        return download_file_with_httplib(cli, remote_path, local_path, progress_label, opt, err);
     } else {
         httplib::Client cli(base.host, base.port);
         cli.set_follow_location(true);
@@ -387,7 +485,7 @@ bool download_url_to_file(const HttpUrlParts& base,
         if (!opt.proxy_host.empty() && opt.proxy_port > 0) {
             cli.set_proxy(opt.proxy_host, opt.proxy_port);
         }
-        return download_file_with_httplib(cli, remote_path, local_path, err);
+        return download_file_with_httplib(cli, remote_path, local_path, progress_label, opt, err);
     }
 }
 
@@ -405,7 +503,7 @@ bool ensure_model_downloaded(const std::filesystem::path& model_dir,
     // Ensure model.json exists first (so we can infer the rest of required files).
     if (!file_exists_nonempty(model_dir / "model.json")) {
         std::string dl_err;
-        if (!download_url_to_file(base, "model.json", model_dir / "model.json", dlopt, &dl_err)) {
+        if (!download_url_to_file(base, "model.json", model_dir / "model.json", dlopt, "model.json", &dl_err)) {
             if (err) *err = "download model.json failed: " + dl_err;
             return false;
         }
@@ -418,12 +516,17 @@ bool ensure_model_downloaded(const std::filesystem::path& model_dir,
         return false;
     }
 
+    size_t idx = 0;
+    const size_t total_files = expected.size();
     for (const auto& rel : expected) {
+        ++idx;
         if (rel == "model.json") continue;
         auto local = model_dir / rel;
         if (file_exists_nonempty(local)) continue;
         std::string dl_err;
-        if (!download_url_to_file(base, rel, local, dlopt, &dl_err)) {
+        std::ostringstream label;
+        label << idx << "/" << total_files << " " << rel;
+        if (!download_url_to_file(base, rel, local, dlopt, label.str(), &dl_err)) {
             if (err) *err = "download failed: " + rel + " (" + dl_err + ")";
             return false;
         }
@@ -1214,6 +1317,12 @@ int main(int argc, char** argv) {
                 dlopt.connect_timeout_sec = std::max(1, opt.model_download_connect_timeout_sec);
                 dlopt.stall_timeout_sec = std::max(1, opt.model_download_stall_timeout_sec);
                 dlopt.total_timeout_sec = std::max(0, opt.model_download_total_timeout_sec);
+                {
+                    int progress = 1;
+                    if (getenv_int("NCNN_RAG_MODEL_DL_PROGRESS", &progress)) {
+                        dlopt.show_progress = (progress != 0);
+                    }
+                }
                 if (opt.model_download_use_proxy) {
                     std::string proxy_host;
                     int proxy_port = 0;
