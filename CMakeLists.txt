@@ -10,20 +10,6 @@ include(CheckCXXSourceCompiles)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-option(NCNN_RAG_FETCH_USE_PROXY "Use proxy for CMake FetchContent downloads" ON)
-set(NCNN_RAG_FETCH_PROXY "192.168.8.3:18080" CACHE STRING "Proxy (HOST:PORT or URL) for CMake FetchContent downloads")
-if (NCNN_RAG_FETCH_USE_PROXY)
-  set(_proxy "${NCNN_RAG_FETCH_PROXY}")
-  if (NOT _proxy MATCHES "^[a-zA-Z][a-zA-Z0-9+.-]*://")
-    set(_proxy "http://${_proxy}")
-  endif()
-  set(ENV{http_proxy}  "${_proxy}")
-  set(ENV{https_proxy} "${_proxy}")
-  set(ENV{HTTP_PROXY}  "${_proxy}")
-  set(ENV{HTTPS_PROXY} "${_proxy}")
-  set(ENV{ALL_PROXY}   "${_proxy}")
-endif()
-
 FetchContent_Declare(
   nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
