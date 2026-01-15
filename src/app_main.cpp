@@ -1142,10 +1142,27 @@ std::string to_lower_copy(std::string s) {
     return s;
 }
 
+std::string basename_from_filename(const std::string& name) {
+    size_t pos = name.find_last_of("/\\");
+    if (pos == std::string::npos) return name;
+    if (pos + 1 >= name.size()) return {};
+    return name.substr(pos + 1);
+}
+
 std::string file_ext_lower(const std::string& name) {
-    std::filesystem::path p(name);
-    std::string ext = p.extension().string();
-    return to_lower_copy(ext);
+    // Avoid std::filesystem::path(name) here: on Windows, constructing a path from a narrow string
+    // may interpret it as the system code page and throw for Unicode filenames.
+    const std::string base = basename_from_filename(name);
+    size_t dot = base.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= base.size()) return {};
+    return to_lower_copy(base.substr(dot));
+}
+
+std::string file_stem(const std::string& name) {
+    const std::string base = basename_from_filename(name);
+    size_t dot = base.find_last_of('.');
+    if (dot == std::string::npos) return base;
+    return base.substr(0, dot);
 }
 
 std::string sanitize_filename(std::string s) {
@@ -1226,7 +1243,7 @@ bool ingest_document(const std::string& filename,
                 if (trace) trace->push_back("pdf txt export skipped: " + dir_ec.message());
             } else {
                 std::filesystem::path outdir(opt.pdf_txt_dir);
-                std::string base = sanitize_filename(std::filesystem::path(filename).stem().string());
+                std::string base = sanitize_filename(file_stem(filename));
                 if (base.empty()) base = "pdf";
                 std::filesystem::path outpath = outdir / (base + ".txt");
                 for (int i = 1; std::filesystem::exists(outpath, dir_ec) && i < 1000; ++i) {
