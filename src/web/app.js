@@ -422,6 +422,35 @@ async function fetchMcpTools() {
   }
 }
 
+function uploadToRagWithProgress(formData, { timeoutMs = 10 * 60 * 1000, onProgress } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/rag/upload', true);
+    xhr.timeout = timeoutMs;
+    xhr.responseType = 'text';
+
+    let lastProgressAt = 0;
+    xhr.upload.onprogress = (evt) => {
+      if (!evt || !evt.lengthComputable) return;
+      const now = Date.now();
+      if (now - lastProgressAt < 200) return;
+      lastProgressAt = now;
+      if (typeof onProgress === 'function') onProgress(evt.loaded, evt.total);
+    };
+
+    xhr.onload = () => {
+      const status = xhr.status || 0;
+      const text = xhr.responseText || '';
+      if (status >= 200 && status < 300) resolve({ status, text });
+      else reject(new Error(`HTTP ${status}: ${text || xhr.statusText || 'upload failed'}`));
+    };
+    xhr.onerror = () => reject(new Error('网络错误：上传失败'));
+    xhr.ontimeout = () => reject(new Error(`上传超时（${Math.round(timeoutMs / 1000)}s）`));
+
+    xhr.send(formData);
+  });
+}
+
 async function callMcpTool(name, args) {
   const resp = await fetch('/mcp/tools/call', {
     method: 'POST',
@@ -627,12 +656,20 @@ uploadForm.addEventListener('submit', async (e) => {
     } else {
       formData.append('file', file);
     }
-    const resp = await fetch('/rag/upload', { method: 'POST', body: formData });
-    if (!resp.ok) {
-      const msg = await resp.text();
-      throw new Error(msg);
+    logProcess('开始上传到服务器...', true);
+    const { text } = await uploadToRagWithProgress(formData, {
+      timeoutMs: 10 * 60 * 1000,
+      onProgress: (loaded, total) => {
+        const pct = total > 0 ? Math.floor((loaded / total) * 100) : 0;
+        logProcess(`上传进度：${pct}% (${Math.round(loaded / 1024)} KiB / ${Math.round(total / 1024)} KiB)`);
+      }
+    });
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      throw new Error(`服务器返回非 JSON：${text}`);
     }
-    const data = await resp.json();
     if (Array.isArray(data.trace)) {
       data.trace.forEach((line) => logProcess(`索引步骤：${line}`));
     }

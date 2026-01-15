@@ -1440,6 +1440,10 @@ int main(int argc, char** argv) {
     std::mutex model_mutex;
 
     httplib::Server server;
+    // Avoid silent hangs when clients stall (common on Windows with AV/proxy).
+    // Note: handlers are invoked only after the full request body is received.
+    server.set_read_timeout(std::chrono::seconds(120));
+    server.set_payload_max_length(256ULL * 1024 * 1024);
     bool mounted_web_root = false;
     if (!is_embedded_web_root(opt.web_root)) {
         mounted_web_root = server.set_mount_point("/", opt.web_root.c_str());
