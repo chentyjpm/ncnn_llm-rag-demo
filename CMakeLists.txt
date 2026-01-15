@@ -88,6 +88,23 @@ target_link_libraries(ncnn_llm_rag_app PRIVATE
   Threads::Threads
 )
 
+# macOS: iconv symbols may require explicit linkage.
+if (APPLE)
+  find_package(Iconv QUIET)
+  if (Iconv_FOUND)
+    if (TARGET Iconv::Iconv)
+      target_link_libraries(ncnn_llm_rag_app PRIVATE Iconv::Iconv)
+    elseif (Iconv_LIBRARIES)
+      target_link_libraries(ncnn_llm_rag_app PRIVATE ${Iconv_LIBRARIES})
+    endif()
+  else()
+    find_library(ICONV_LIBRARY iconv)
+    if (ICONV_LIBRARY)
+      target_link_libraries(ncnn_llm_rag_app PRIVATE ${ICONV_LIBRARY})
+    endif()
+  endif()
+endif()
+
 target_compile_definitions(ncnn_llm_rag_app PRIVATE NCNN_LLM_WITH_OPENCV=0)
 if (WIN32)
   target_compile_definitions(ncnn_llm_rag_app PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
