@@ -8,6 +8,8 @@
 
 基于 **ncnn** 的本地离线 LLM + RAG 检索增强问答 Demo（单个可执行程序 + 内置 Web UI），用于验证/调试 `ncnn_llm` 在文档检索场景下的集成效果。
 
+Web UI 使用说明：[`HOWTOUSE.md`](HOWTOUSE.md)
+
 配合来使用的项目/依赖：
 - `ncnn_llm`：`ncnn_llm/`（本仓库以子模块/源码形式包含）
 - `ncnn`：`find_package(ncnn CONFIG REQUIRED)`（通过 `ncnn_DIR` / `CMAKE_PREFIX_PATH` 查找）
