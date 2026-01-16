@@ -14,6 +14,20 @@
 
 如果你改了端口（`--port`），把 `8080` 换成对应端口即可。
 
+### 使用在线 API（OpenAI 兼容）
+
+如果你不想跑本地模型、希望改用在线 API（仍保留本项目的 Web UI / RAG / 本地 OpenAI 兼容接口），可以用：
+
+```bash
+export OPENAI_API_KEY="YOUR_KEY"
+./build/ncnn_llm_rag_app --llm-backend api --api-base https://api.openai.com/ --api-model gpt-4o-mini
+```
+
+说明：
+- `--api-model` 建议必填：Web UI 默认会传 `qwen3-0.6b`，多数在线服务需要换成你实际可用的模型名
+- 也可用环境变量 `NCNN_RAG_API_KEY` 代替 `OPENAI_API_KEY`
+- Web UI 的“流式输出 / 思考”会透传给上游；若上游用 `reasoning_content` 返回思考，会自动转换成 `<think>...</think>` 展示
+
 ### 首次启动：可能需要等待自动下载模型
 
 如果本地模型目录（默认 `assets/qwen3_0.6b/`）缺少文件或不完整，程序会在启动阶段自动从默认镜像地址下载模型文件。此时：

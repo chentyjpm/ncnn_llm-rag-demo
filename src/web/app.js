@@ -15,12 +15,14 @@ const uploadForm = document.getElementById('uploadForm');
 const uploadFile = document.getElementById('uploadFile');
 const uploadBtn = document.getElementById('uploadBtn');
 const tokenStats = document.getElementById('tokenStats');
+const speedStats = document.getElementById('speedStats');
 const memStats = document.getElementById('memStats');
 
 const history = [];
 let mcpReady = false;
 let lastUsage = null;
 let lastMem = null;
+let speedState = null;
 
 function setTokenStats(usage) {
   if (!tokenStats) return;
@@ -71,6 +73,38 @@ function setMemStats(mem) {
   if (kv) parts.push(`KV ${kv}`);
   memStats.textContent = parts.length ? `Mem：${parts.join(' · ')}` : 'Mem：-';
   lastMem = mem;
+}
+
+function setSpeedStats(text) {
+  if (!speedStats) return;
+  speedStats.textContent = text || '速度：-';
+}
+
+function resetSpeed() {
+  speedState = {
+    startMs: performance.now(),
+    lastRenderMs: 0,
+    chars: 0,
+    tokens: null
+  };
+  setSpeedStats('速度：-');
+}
+
+function updateSpeedNow(force = false) {
+  if (!speedState) return;
+  const now = performance.now();
+  if (!force && speedState.lastRenderMs && now - speedState.lastRenderMs < 250) return;
+  speedState.lastRenderMs = now;
+
+  const elapsedSec = Math.max(1e-6, (now - speedState.startMs) / 1000);
+  const charsPerSec = speedState.chars / elapsedSec;
+  const parts = [];
+  if (Number.isFinite(speedState.tokens)) {
+    const tokPerSec = speedState.tokens / elapsedSec;
+    parts.push(`${tokPerSec.toFixed(1)} tok/s`);
+  }
+  parts.push(`${charsPerSec.toFixed(1)} 字/s`);
+  setSpeedStats(`速度：${parts.join(' · ')}`);
 }
 
 function escapeHtml(str) {
@@ -484,6 +518,7 @@ async function sendMessage(content) {
   addMessage('user', content);
   addMessage('assistant', '生成中...');
   setTokenStats(null);
+  resetSpeed();
   setMemStats(null);
 
   resetProcess();
@@ -566,6 +601,7 @@ async function sendMessage(content) {
 
   let assistantText = '';
   try {
+    const t0 = performance.now();
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -596,7 +632,12 @@ async function sendMessage(content) {
             const j = JSON.parse(data);
             if (j.usage) setTokenStats(j.usage);
             if (j.mem) setMemStats(j.mem);
+            if (Number.isFinite(j.usage?.completion_tokens)) speedState.tokens = j.usage.completion_tokens;
             const delta = j.choices?.[0]?.delta?.content || '';
+            if (delta) {
+              speedState.chars += delta.length;
+              updateSpeedNow(false);
+            }
             assistantText += delta;
             updateLastAssistantHTML(renderAssistantStreaming(assistantText));
           } catch (err) {
@@ -605,12 +646,17 @@ async function sendMessage(content) {
         }
         if (streamDone) break;
       }
+      updateSpeedNow(true);
     } else {
       const j = await resp.json();
       assistantText = j.choices?.[0]?.message?.content || '';
       updateLastAssistantHTML(renderAssistantStreaming(assistantText));
       if (j.usage) setTokenStats(j.usage);
       if (j.mem) setMemStats(j.mem);
+      if (Number.isFinite(j.usage?.completion_tokens)) speedState.tokens = j.usage.completion_tokens;
+      speedState.chars = assistantText.length;
+      speedState.startMs = t0;
+      updateSpeedNow(true);
     }
     history.push({ role: 'assistant', content: assistantText });
   } catch (err) {

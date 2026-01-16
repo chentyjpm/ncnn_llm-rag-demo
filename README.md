@@ -109,6 +109,7 @@ Usage: ./build/ncnn_llm_rag_app [options]
   --model-dl-connect-timeout N  Connect timeout in seconds (default: 15)
   --model-dl-stall-timeout N    Abort if transfer stalls for N seconds (default: 60)
   --model-dl-timeout N          Overall timeout per file (0=disable, default: 0)
+  --model-dl-proxy HOST:PORT    Use HTTP proxy for downloads (default: none)
   --no-model-dl-proxy           Disable download proxy
   --docs PATH       Seed docs directory (default: assets/rag)
   --web PATH        Web root to serve (default: :embedded:)
@@ -126,12 +127,36 @@ Usage: ./build/ncnn_llm_rag_app [options]
   --no-rag          Disable retrieval
   --no-pdf-txt      Disable exporting extracted PDF text
   --vulkan          Enable Vulkan compute
+  --llm-backend NAME  LLM backend: local|api (default: local)
+  --api-base URL      OpenAI-compatible base URL, e.g. https://api.openai.com/ (or .../v1/)
+  --api-key KEY       API key (or env OPENAI_API_KEY / NCNN_RAG_API_KEY)
+  --api-model NAME    Override request model when using --llm-backend api
+  --api-timeout N     API connect/read timeout seconds (default: 120)
+  --api-proxy HOST:PORT  Use HTTP proxy for API requests
+  --api-no-verify     Disable TLS certificate verification for API
   --help            Show this help
 ```
 
 默认监听：
 - Web UI：`http://localhost:8080/`
 - OpenAI 接口：`POST http://localhost:8080/v1/chat/completions`
+
+## 在线 API 模式（OpenAI 兼容）
+
+如果你想让本程序把 LLM 推理改为调用在线 API（仍保留 Web UI / RAG / OpenAI 兼容本地接口），可以：
+
+```bash
+export OPENAI_API_KEY="YOUR_KEY"
+./build/ncnn_llm_rag_app \
+  --llm-backend api \
+  --api-base https://api.openai.com/ \
+  --api-model gpt-4o-mini
+```
+
+说明：
+- `--api-base` 支持传 `https://xxx/` 或 `https://xxx/v1/`（程序会自动补默认 `/v1/`）
+- `--api-model` 用于覆盖前端/客户端传来的 `model`（Web UI 默认会传 `qwen3-0.6b`，在线 API 一般需要改成你的模型名）
+- `stream=true` 会透传上游的 SSE 流；若上游用 `reasoning_content` 单独返回思考过程，会自动合并为 `<think>...</think>` 以便 Web UI 展示
 
 常用参数（可执行程序 `--help` 查看完整说明）：
 - `--model PATH`：模型目录（默认 `assets/qwen3_0.6b`）

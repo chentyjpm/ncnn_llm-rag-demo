@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -55,6 +56,11 @@ struct HttpUrlParts {
     std::string host;
     int port = 80;
     std::string base_path;
+};
+
+enum class LlmBackend {
+    Local,
+    OpenAICompat,
 };
 
 struct MemSnapshot {
@@ -219,6 +225,43 @@ bool parse_host_port(const std::string& in, std::string* host, int* port, std::s
     *host = h;
     *port = v;
     return true;
+}
+
+std::string getenv_str(const char* name) {
+    const char* v = std::getenv(name);
+    if (!v) return "";
+    return std::string(v);
+}
+
+std::string trim_copy(const std::string& s) {
+    size_t b = 0;
+    while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    size_t e = s.size();
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+std::vector<std::string> split_utf8_safe(const std::string& s, size_t max_bytes) {
+    std::vector<std::string> out;
+    if (max_bytes == 0 || s.size() <= max_bytes) {
+        out.push_back(s);
+        return out;
+    }
+    auto is_cont = [&](unsigned char c) { return (c & 0xC0) == 0x80; };
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t end = std::min(i + max_bytes, s.size());
+        while (end > i && end < s.size() && is_cont(static_cast<unsigned char>(s[end]))) {
+            --end;
+        }
+        if (end == i) {
+            end = std::min(i + max_bytes, s.size());
+            while (end < s.size() && is_cont(static_cast<unsigned char>(s[end]))) ++end;
+        }
+        out.push_back(s.substr(i, end - i));
+        i = end;
+    }
+    return out;
 }
 
 bool file_exists_nonempty(const std::filesystem::path& p) {
@@ -553,6 +596,11 @@ std::string truncate_for_log(const std::string& s, size_t max_len) {
     return cleaned.substr(0, max_len) + "...(" + std::to_string(cleaned.size()) + " bytes)";
 }
 
+std::string redact_api_key_for_log(const std::string& s) {
+    if (s.size() <= 8) return "<redacted>";
+    return s.substr(0, 3) + "..." + s.substr(s.size() - 3);
+}
+
 std::string sanitize_utf8_strict(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -685,6 +733,375 @@ void log_event(const std::string& tag, const std::string& msg) {
 
 std::string dump_json_safe(const json& j) {
     return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+json messages_to_openai_json(const std::vector<Message>& messages) {
+    json arr = json::array();
+    for (const auto& m : messages) {
+        json item;
+        item["role"] = m.role;
+        item["content"] = m.content;
+        arr.push_back(std::move(item));
+    }
+    return arr;
+}
+
+struct OpenAICompatOptions {
+    bool enabled = false;
+    HttpUrlParts base;
+    std::string api_key;
+    std::string model_override;
+    bool verify_tls = true;
+    int timeout_sec = 120;
+    std::string proxy_host;
+    int proxy_port = 0;
+};
+
+bool init_openai_compat(const std::string& base_url,
+                        const std::string& api_key,
+                        const std::string& model_override,
+                        bool verify_tls,
+                        int timeout_sec,
+                        const std::string& proxy,
+                        bool use_proxy,
+                        OpenAICompatOptions* out,
+                        std::string* err) {
+    if (!out) return false;
+    if (trim_copy(base_url).empty()) {
+        if (err) *err = "missing --api-base";
+        return false;
+    }
+    HttpUrlParts base;
+    std::string parse_err;
+    if (!parse_url_base(base_url, &base, &parse_err)) {
+        if (err) *err = "invalid --api-base: " + parse_err;
+        return false;
+    }
+    std::string key = trim_copy(api_key);
+    if (key.empty()) key = trim_copy(getenv_str("NCNN_RAG_API_KEY"));
+    if (key.empty()) key = trim_copy(getenv_str("OPENAI_API_KEY"));
+    if (key.empty()) {
+        if (err) *err = "missing api key: pass --api-key or set OPENAI_API_KEY/NCNN_RAG_API_KEY";
+        return false;
+    }
+
+    out->enabled = true;
+    out->base = base;
+    out->api_key = key;
+    out->model_override = trim_copy(model_override);
+    out->verify_tls = verify_tls;
+    out->timeout_sec = std::max(1, timeout_sec);
+    if (use_proxy) {
+        std::string ph;
+        int pp = 0;
+        std::string perr;
+        if (!parse_host_port(proxy, &ph, &pp, &perr)) {
+            if (err) *err = "invalid --api-proxy: " + perr;
+            return false;
+        }
+        out->proxy_host = ph;
+        out->proxy_port = pp;
+    }
+    return true;
+}
+
+struct OpenAICompatResult {
+    int http_status = 0;
+    std::string body;
+    std::string err;
+};
+
+template <class ClientT>
+OpenAICompatResult openai_post_raw(ClientT& cli,
+                                  const std::string& path,
+                                  const httplib::Headers& headers,
+                                  const std::string& body,
+                                  const std::string& content_type) {
+    OpenAICompatResult out;
+    auto res = cli.Post(path.c_str(), headers, body, content_type.c_str());
+    if (!res) {
+        out.err = "http request failed";
+        return out;
+    }
+    out.http_status = res->status;
+    out.body = res->body;
+    return out;
+}
+
+OpenAICompatResult openai_chat_completions_raw(const OpenAICompatOptions& opt, const json& req_body) {
+    httplib::Headers headers;
+    headers.emplace("Authorization", "Bearer " + opt.api_key);
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Accept", "application/json");
+
+    std::string api_base_path = opt.base.base_path;
+    if (api_base_path == "/") api_base_path = "/v1/";
+    std::string path = api_base_path + "chat/completions";
+
+    std::string body = req_body.dump();
+
+    if (opt.base.scheme == "https") {
+        httplib::SSLClient cli(opt.base.host, opt.base.port);
+        cli.set_follow_location(true);
+        cli.set_connection_timeout(opt.timeout_sec);
+        cli.set_read_timeout(opt.timeout_sec);
+        if (!opt.proxy_host.empty() && opt.proxy_port > 0) cli.set_proxy(opt.proxy_host, opt.proxy_port);
+        cli.enable_server_certificate_verification(opt.verify_tls);
+        return openai_post_raw(cli, path, headers, body, "application/json");
+    }
+
+    httplib::Client cli(opt.base.host, opt.base.port);
+    cli.set_follow_location(true);
+    cli.set_connection_timeout(opt.timeout_sec);
+    cli.set_read_timeout(opt.timeout_sec);
+    if (!opt.proxy_host.empty() && opt.proxy_port > 0) cli.set_proxy(opt.proxy_host, opt.proxy_port);
+    return openai_post_raw(cli, path, headers, body, "application/json");
+}
+
+bool pop_sse_block(std::string* buf, std::string* out_block) {
+    if (!buf || !out_block) return false;
+    size_t pos_lf = buf->find("\n\n");
+    size_t pos_crlf = buf->find("\r\n\r\n");
+    size_t pos = std::string::npos;
+    size_t delim = 0;
+    if (pos_lf != std::string::npos) {
+        pos = pos_lf;
+        delim = 2;
+    }
+    if (pos_crlf != std::string::npos && (pos == std::string::npos || pos_crlf < pos)) {
+        pos = pos_crlf;
+        delim = 4;
+    }
+    if (pos == std::string::npos) return false;
+    *out_block = buf->substr(0, pos);
+    buf->erase(0, pos + delim);
+    return true;
+}
+
+bool is_sse_data_line(const std::string& line, std::string* out_data) {
+    if (!out_data) return false;
+    if (line.rfind("data:", 0) != 0) return false;
+    std::string data = line.substr(5);
+    *out_data = trim_copy(data);
+    return true;
+}
+
+template <class ClientT>
+bool openai_chat_completions_stream_to_sink(ClientT& cli,
+                                            const std::string& path,
+                                            const httplib::Headers& headers,
+                                            const std::string& body,
+                                            const std::string& resp_id,
+                                            const json& rag_payload,
+                                            httplib::DataSink& sink,
+                                            std::string* err) {
+    std::string upstream_model;
+    int upstream_status = 0;
+    bool got_status = false;
+    bool ok_status = true;
+    std::string err_body;
+
+    bool in_think = false;
+
+    auto write_chunk = [&](const json& j) {
+        std::string data = "data: " + dump_json_safe(j) + "\n\n";
+        sink.write(data.data(), data.size());
+    };
+    auto write_done = [&]() {
+        const char done[] = "data: [DONE]\n\n";
+        sink.write(done, sizeof(done) - 1);
+    };
+    auto write_error_as_chat = [&](int status, const std::string& msg) {
+        json chunk = {
+            {"id", resp_id},
+            {"object", "chat.completion.chunk"},
+            {"model", upstream_model.empty() ? std::string("upstream") : upstream_model},
+            {"choices", json::array({json{
+                {"index", 0},
+                {"delta", {{"role", "assistant"}, {"content", msg}}},
+                {"finish_reason", nullptr}
+            }})}
+        };
+        (void)status;
+        write_chunk(chunk);
+        json done_chunk = {
+            {"id", resp_id},
+            {"object", "chat.completion.chunk"},
+            {"model", upstream_model.empty() ? std::string("upstream") : upstream_model},
+            {"choices", json::array({json{
+                {"index", 0},
+                {"delta", json::object()},
+                {"finish_reason", "stop"}
+            }})},
+            {"rag", rag_payload}
+        };
+        write_chunk(done_chunk);
+        write_done();
+    };
+
+    std::string buf;
+    httplib::Request req;
+    req.method = "POST";
+    req.path = path;
+    req.headers = headers;
+    req.body = body;
+    req.response_handler = [&](const httplib::Response& res) {
+        upstream_status = res.status;
+        got_status = true;
+        ok_status = (res.status >= 200 && res.status < 300);
+        auto it = res.headers.find("Content-Type");
+        if (it != res.headers.end()) {
+            // noop; kept for potential debugging
+        }
+        return true;
+    };
+
+    req.content_receiver = [&](const char* data, size_t data_length, uint64_t, uint64_t) {
+        if (!ok_status) {
+            err_body.append(data, data_length);
+            return true;
+        }
+        buf.append(data, data_length);
+        std::string block;
+        while (pop_sse_block(&buf, &block)) {
+            std::istringstream iss(block);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                std::string payload;
+                if (!is_sse_data_line(line, &payload)) continue;
+                if (payload == "[DONE]") {
+                    if (in_think) {
+                        json close_chunk = {
+                            {"id", resp_id},
+                            {"object", "chat.completion.chunk"},
+                            {"model", upstream_model.empty() ? std::string("upstream") : upstream_model},
+                            {"choices", json::array({json{
+                                {"index", 0},
+                                {"delta", {{"content", "</think>\n"}}},
+                                {"finish_reason", nullptr}
+                            }})}
+                        };
+                        write_chunk(close_chunk);
+                        in_think = false;
+                    }
+                    write_done();
+                    continue;
+                }
+
+                json j;
+                try {
+                    j = json::parse(payload);
+                } catch (...) {
+                    // Unknown format: pass through.
+                    std::string raw = "data: " + payload + "\n\n";
+                    sink.write(raw.data(), raw.size());
+                    continue;
+                }
+
+                if (j.contains("model") && j["model"].is_string()) upstream_model = j["model"].get<std::string>();
+                j["id"] = resp_id;
+
+                bool finish = false;
+                if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty()) {
+                    auto& choice = j["choices"][0];
+                    if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
+                        finish = true;
+                    }
+                    if (choice.contains("delta") && choice["delta"].is_object()) {
+                        auto& delta = choice["delta"];
+                        if (delta.contains("reasoning_content") && delta["reasoning_content"].is_string()) {
+                            std::string r = delta["reasoning_content"].get<std::string>();
+                            if (!r.empty()) {
+                                std::string content = r;
+                                if (content.find("<think>") == std::string::npos) {
+                                    if (!in_think) content = "<think>" + content;
+                                }
+                                delta["content"] = content;
+                                delta.erase("reasoning_content");
+                                in_think = true;
+                            }
+                        } else if (delta.contains("reasoning") && delta["reasoning"].is_string()) {
+                            std::string r = delta["reasoning"].get<std::string>();
+                            if (!r.empty()) {
+                                std::string content = r;
+                                if (content.find("<think>") == std::string::npos) {
+                                    if (!in_think) content = "<think>" + content;
+                                }
+                                delta["content"] = content;
+                                delta.erase("reasoning");
+                                in_think = true;
+                            }
+                        } else if (delta.contains("content") && delta["content"].is_string()) {
+                            std::string c = delta["content"].get<std::string>();
+                            if (in_think && c.find("</think>") == std::string::npos) {
+                                delta["content"] = "</think>\n" + c;
+                                in_think = false;
+                            }
+                        }
+                    }
+                }
+
+                if (finish) {
+                    if (in_think) {
+                        json close_chunk = {
+                            {"id", resp_id},
+                            {"object", "chat.completion.chunk"},
+                            {"model", upstream_model.empty() ? std::string("upstream") : upstream_model},
+                            {"choices", json::array({json{
+                                {"index", 0},
+                                {"delta", {{"content", "</think>\n"}}},
+                                {"finish_reason", nullptr}
+                            }})}
+                        };
+                        write_chunk(close_chunk);
+                        in_think = false;
+                    }
+                    j["rag"] = rag_payload;
+                }
+
+                write_chunk(j);
+            }
+        }
+        return true;
+    };
+
+    httplib::Response res;
+    httplib::Error error = httplib::Error::Success;
+    bool ok = cli.send(req, res, error);
+    if (!ok_status) {
+        std::string msg = "upstream http " + std::to_string(upstream_status);
+        std::string clipped = truncate_for_log(err_body, 1500);
+        if (!clipped.empty()) msg += ": " + clipped;
+        write_error_as_chat(upstream_status, msg);
+        if (err) *err = msg;
+        return false;
+    }
+    if (!ok) {
+        std::string msg = "upstream request failed";
+        if (err) *err = msg;
+        write_error_as_chat(502, msg);
+        return false;
+    }
+    return true;
+}
+
+std::string extract_upstream_assistant_text_with_thinking(const json& upstream) {
+    if (!upstream.contains("choices") || !upstream["choices"].is_array() || upstream["choices"].empty()) return "";
+    const auto& c0 = upstream["choices"][0];
+    if (!c0.contains("message") || !c0["message"].is_object()) return "";
+    const auto& msg = c0["message"];
+    std::string content = msg.value("content", std::string());
+    std::string reasoning;
+    if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string()) {
+        reasoning = msg["reasoning_content"].get<std::string>();
+    } else if (msg.contains("reasoning") && msg["reasoning"].is_string()) {
+        reasoning = msg["reasoning"].get<std::string>();
+    }
+    if (!reasoning.empty() && content.find("<think>") == std::string::npos) {
+        return "<think>" + reasoning + "</think>\n" + content;
+    }
+    return content;
 }
 
 size_t utf8_safe_cut_pos(const std::string& s, size_t pos) {
@@ -846,6 +1263,15 @@ struct AppOptions {
     bool model_download_use_proxy = false;
     std::string model_download_proxy = "";
     bool malloc_trim = false;
+
+    LlmBackend llm_backend = LlmBackend::Local;
+    std::string api_base;
+    std::string api_key;
+    std::string api_model;
+    int api_timeout_sec = 120;
+    bool api_verify_tls = true;
+    bool api_use_proxy = false;
+    std::string api_proxy;
 };
 
 void print_usage(const char* argv0) {
@@ -874,6 +1300,13 @@ void print_usage(const char* argv0) {
               << "  --no-pdf-txt      Disable exporting extracted PDF text\n"
               << "  --vulkan          Enable Vulkan compute\n"
               << "  --malloc-trim     Call malloc_trim(0) after each request (glibc)\n"
+              << "  --llm-backend NAME  LLM backend: local|api (default: local)\n"
+              << "  --api-base URL      OpenAI-compatible base URL, e.g. https://api.openai.com/ (or .../v1/)\n"
+              << "  --api-key KEY       API key (or env OPENAI_API_KEY / NCNN_RAG_API_KEY)\n"
+              << "  --api-model NAME    Override request model when using --llm-backend api\n"
+              << "  --api-timeout N     API connect/read timeout seconds (default: 120)\n"
+              << "  --api-proxy HOST:PORT  Use HTTP proxy for API requests\n"
+              << "  --api-no-verify     Disable TLS certificate verification for API\n"
               << "  --help            Show this help\n";
 }
 
@@ -884,10 +1317,27 @@ AppOptions parse_options(int argc, char** argv) {
         if (arg == "--help") {
             print_usage(argv[0]);
             std::exit(0);
+        } else if (arg == "--llm-backend" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if (v == "local") opt.llm_backend = LlmBackend::Local;
+            else if (v == "api" || v == "openai" || v == "openai_compat") opt.llm_backend = LlmBackend::OpenAICompat;
         } else if (arg == "--model" && i + 1 < argc) {
             opt.model_path = argv[++i];
         } else if (arg == "--model-url" && i + 1 < argc) {
             opt.model_url = argv[++i];
+        } else if (arg == "--api-base" && i + 1 < argc) {
+            opt.api_base = argv[++i];
+        } else if (arg == "--api-key" && i + 1 < argc) {
+            opt.api_key = argv[++i];
+        } else if (arg == "--api-model" && i + 1 < argc) {
+            opt.api_model = argv[++i];
+        } else if (arg == "--api-timeout" && i + 1 < argc) {
+            if (auto v = parse_int(argv[++i])) opt.api_timeout_sec = std::max(1, *v);
+        } else if (arg == "--api-proxy" && i + 1 < argc) {
+            opt.api_proxy = argv[++i];
+            opt.api_use_proxy = true;
+        } else if (arg == "--api-no-verify") {
+            opt.api_verify_tls = false;
         } else if (arg == "--model-dl-connect-timeout" && i + 1 < argc) {
             if (auto v = parse_int(argv[++i])) opt.model_download_connect_timeout_sec = std::max(1, *v);
         } else if (arg == "--model-dl-stall-timeout" && i + 1 < argc) {
@@ -1332,7 +1782,31 @@ int main(int argc, char** argv) {
     opt.db_path = normalize_path(opt.db_path, opt.data_dir);
     opt.pdf_txt_dir = normalize_path(opt.pdf_txt_dir, opt.data_dir);
 
-    {
+    OpenAICompatOptions openai;
+    if (opt.llm_backend == LlmBackend::OpenAICompat) {
+        std::string api_err;
+        if (!init_openai_compat(opt.api_base,
+                               opt.api_key,
+                               opt.api_model,
+                               opt.api_verify_tls,
+                               opt.api_timeout_sec,
+                               opt.api_proxy,
+                               opt.api_use_proxy,
+                               &openai,
+                               &api_err)) {
+            std::cerr << "API backend init failed: " << api_err << "\n";
+            return 2;
+        }
+        log_event("llm.backend", "name=api base=" + openai.base.scheme + "://" + openai.base.host + ":" +
+                                   std::to_string(openai.base.port) + openai.base.base_path +
+                                   " model_override=" + (openai.model_override.empty() ? "(none)" : openai.model_override) +
+                                   " key=" + redact_api_key_for_log(openai.api_key) +
+                                   " timeout_sec=" + std::to_string(openai.timeout_sec) +
+                                   " verify_tls=" + std::string(openai.verify_tls ? "1" : "0") +
+                                   " proxy=" + (openai.proxy_host.empty() ? "(none)" : (openai.proxy_host + ":" + std::to_string(openai.proxy_port))));
+    }
+
+    if (opt.llm_backend == LlmBackend::Local) {
         std::vector<std::string> missing;
         std::string model_err;
         if (!is_model_complete(opt.model_path, &missing, &model_err)) {
@@ -1383,24 +1857,29 @@ int main(int argc, char** argv) {
         }
     }
 
-    bool use_vulkan_runtime = opt.use_vulkan;
+    bool use_vulkan_runtime = false;
+    if (opt.llm_backend == LlmBackend::Local) {
+        use_vulkan_runtime = opt.use_vulkan;
 #if defined(NCNN_RAG_HAS_VULKAN_API) && NCNN_RAG_HAS_VULKAN_API
-    if (opt.use_vulkan) {
-        ncnn::create_gpu_instance();
-        int gpu_count = ncnn::get_gpu_count();
-        if (gpu_count <= 0) {
-            use_vulkan_runtime = false;
-            log_event("vulkan", "requested=1 gpu_count=0 (fallback to cpu)");
-        } else {
-            log_event("vulkan", "requested=1 gpu_count=" + std::to_string(gpu_count));
+        if (opt.use_vulkan) {
+            ncnn::create_gpu_instance();
+            int gpu_count = ncnn::get_gpu_count();
+            if (gpu_count <= 0) {
+                use_vulkan_runtime = false;
+                log_event("vulkan", "requested=1 gpu_count=0 (fallback to cpu)");
+            } else {
+                log_event("vulkan", "requested=1 gpu_count=" + std::to_string(gpu_count));
+            }
         }
-    }
 #else
-    if (opt.use_vulkan) {
-        use_vulkan_runtime = false;
-        log_event("vulkan", "requested=1 but ncnn gpu api unavailable (fallback to cpu)");
-    }
+        if (opt.use_vulkan) {
+            use_vulkan_runtime = false;
+            log_event("vulkan", "requested=1 but ncnn gpu api unavailable (fallback to cpu)");
+        }
 #endif
+    } else if (opt.use_vulkan) {
+        log_event("vulkan", "requested=1 but llm_backend=api (ignored)");
+    }
 
     log_event("startup", "model_path=" + opt.model_path +
                          " model_url=" + opt.model_url +
@@ -1423,7 +1902,8 @@ int main(int argc, char** argv) {
                          " rag_enabled=" + std::string(opt.rag_enabled ? "1" : "0") +
                          " save_pdf_txt=" + std::string(opt.save_pdf_txt ? "1" : "0") +
                          " vulkan=" + std::string(opt.use_vulkan ? "1" : "0") +
-                         " vulkan_runtime=" + std::string(use_vulkan_runtime ? "1" : "0"));
+                         " vulkan_runtime=" + std::string(use_vulkan_runtime ? "1" : "0") +
+                         " llm_backend=" + std::string(opt.llm_backend == LlmBackend::Local ? "local" : "api"));
 
     std::filesystem::path data_root(opt.data_dir);
     std::filesystem::path upload_dir = data_root / "uploads";
@@ -1464,7 +1944,10 @@ int main(int argc, char** argv) {
                               " chunk_count=" + std::to_string(rag.chunk_count()));
     }
 
-    ncnn_llm_gpt model(opt.model_path, use_vulkan_runtime);
+    std::unique_ptr<ncnn_llm_gpt> model;
+    if (opt.llm_backend == LlmBackend::Local) {
+        model = std::make_unique<ncnn_llm_gpt>(opt.model_path, use_vulkan_runtime);
+    }
     std::mutex model_mutex;
 
     httplib::Server server;
@@ -1984,6 +2467,141 @@ int main(int argc, char** argv) {
             }
         }
 
+        size_t system_prompt_len = 0;
+        if (!messages.empty() && messages.front().role == "system") {
+            system_prompt_len = messages.front().content.size();
+        }
+        json rag_payload;
+        if (client_rag && body.contains("rag_payload") && body["rag_payload"].is_object()) {
+            rag_payload = body["rag_payload"];
+        } else {
+            size_t doc_count = 0;
+            size_t chunk_count = 0;
+            {
+                std::lock_guard<std::mutex> lock(rag_mutex);
+                doc_count = rag.doc_count();
+                chunk_count = rag.chunk_count();
+            }
+            rag_payload = build_rag_payload(hits,
+                                            rag_enabled && rag_ready,
+                                            rag_top_k,
+                                            doc_count,
+                                            chunk_count,
+                                            rag_trace.empty() ? nullptr : &rag_trace,
+                                            rag_error.empty() ? nullptr : &rag_error);
+        }
+
+        log_event("prompt.build", "id=" + resp_id +
+                                  " system_prompt_len=" + std::to_string(system_prompt_len) +
+                                  " rag_context_len=" + std::to_string(rag_context.size()) +
+                                  " messages=" + std::to_string(messages.size()) +
+                                  " backend=" + std::string(opt.llm_backend == LlmBackend::Local ? "local" : "api"));
+
+        if (opt.llm_backend == LlmBackend::OpenAICompat) {
+            json api_req;
+            api_req["model"] = openai.model_override.empty() ? body.value("model", std::string("gpt-4o-mini")) : openai.model_override;
+            api_req["messages"] = messages_to_openai_json(messages);
+
+            if (body.contains("temperature") && body["temperature"].is_number()) api_req["temperature"] = body["temperature"];
+            if (body.contains("top_p") && body["top_p"].is_number()) api_req["top_p"] = body["top_p"];
+            if (body.contains("max_tokens") && body["max_tokens"].is_number_integer()) api_req["max_tokens"] = body["max_tokens"];
+            if (body.contains("presence_penalty") && body["presence_penalty"].is_number()) api_req["presence_penalty"] = body["presence_penalty"];
+            if (body.contains("frequency_penalty") && body["frequency_penalty"].is_number()) api_req["frequency_penalty"] = body["frequency_penalty"];
+            if (body.contains("stop") && (body["stop"].is_string() || body["stop"].is_array())) api_req["stop"] = body["stop"];
+            if (body.contains("seed") && body["seed"].is_number_integer()) api_req["seed"] = body["seed"];
+            if (enable_thinking) api_req["enable_thinking"] = true;
+
+            if (stream) {
+                api_req["stream"] = true;
+                httplib::Headers headers;
+                headers.emplace("Authorization", "Bearer " + openai.api_key);
+                headers.emplace("Content-Type", "application/json");
+                headers.emplace("Accept", "text/event-stream");
+
+                std::string api_base_path = openai.base.base_path;
+                if (api_base_path == "/") api_base_path = "/v1/";
+                std::string path = api_base_path + "chat/completions";
+                std::string req_body = api_req.dump();
+
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "keep-alive");
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [&, headers, path, req_body, resp_id, rag_payload](size_t, httplib::DataSink& sink) mutable {
+                        std::string stream_err;
+                        if (openai.base.scheme == "https") {
+                            httplib::SSLClient cli(openai.base.host, openai.base.port);
+                            cli.set_follow_location(true);
+                            cli.set_connection_timeout(openai.timeout_sec);
+                            cli.set_read_timeout(openai.timeout_sec);
+                            if (!openai.proxy_host.empty() && openai.proxy_port > 0) cli.set_proxy(openai.proxy_host, openai.proxy_port);
+                            cli.enable_server_certificate_verification(openai.verify_tls);
+                            openai_chat_completions_stream_to_sink(cli, path, headers, req_body, resp_id, rag_payload, sink, &stream_err);
+                        } else {
+                            httplib::Client cli(openai.base.host, openai.base.port);
+                            cli.set_follow_location(true);
+                            cli.set_connection_timeout(openai.timeout_sec);
+                            cli.set_read_timeout(openai.timeout_sec);
+                            if (!openai.proxy_host.empty() && openai.proxy_port > 0) cli.set_proxy(openai.proxy_host, openai.proxy_port);
+                            openai_chat_completions_stream_to_sink(cli, path, headers, req_body, resp_id, rag_payload, sink, &stream_err);
+                        }
+                        return false;
+                    },
+                    [](bool) {});
+                return;
+            }
+
+            api_req["stream"] = false;
+            OpenAICompatResult api_res = openai_chat_completions_raw(openai, api_req);
+            if (!api_res.err.empty()) {
+                res.status = 502;
+                json errj = make_error(502, "upstream api error: " + api_res.err);
+                errj["rag"] = rag_payload;
+                res.set_content(dump_json_safe(errj), "application/json");
+                log_event("chat.api.error", "id=" + resp_id + " err=" + api_res.err);
+                return;
+            }
+            if (api_res.http_status < 200 || api_res.http_status >= 300) {
+                res.status = api_res.http_status ? api_res.http_status : 502;
+                json errj = make_error(res.status, "upstream api http " + std::to_string(api_res.http_status));
+                std::string clipped = truncate_for_log(api_res.body, 1500);
+                errj["upstream_body"] = clipped;
+                errj["rag"] = rag_payload;
+                res.set_content(dump_json_safe(errj), "application/json");
+                log_event("chat.api.http_error", "id=" + resp_id + " status=" + std::to_string(api_res.http_status) +
+                                                " body=" + clipped);
+                return;
+            }
+
+            json upstream;
+            try {
+                upstream = json::parse(api_res.body);
+            } catch (const std::exception& e) {
+                res.status = 502;
+                json errj = make_error(502, std::string("upstream api invalid json: ") + e.what());
+                errj["rag"] = rag_payload;
+                res.set_content(dump_json_safe(errj), "application/json");
+                log_event("chat.api.invalid_json", "id=" + resp_id + " what=" + std::string(e.what()));
+                return;
+            }
+
+            // Make the Web UI render "thinking" if upstream provides it separately.
+            if (upstream.contains("choices") && upstream["choices"].is_array() && !upstream["choices"].empty()) {
+                auto& c0 = upstream["choices"][0];
+                if (c0.contains("message") && c0["message"].is_object()) {
+                    auto& msg = c0["message"];
+                    if (msg.contains("content") && msg["content"].is_string()) {
+                        std::string merged = extract_upstream_assistant_text_with_thinking(upstream);
+                        if (!merged.empty()) msg["content"] = merged;
+                    }
+                }
+            }
+            upstream["rag"] = rag_payload;
+            res.set_content(dump_json_safe(upstream), "application/json");
+            return;
+        }
+
         GenerateConfig cfg;
         cfg.max_new_tokens = body.value("max_tokens", cfg.max_new_tokens);
         cfg.temperature = body.value("temperature", cfg.temperature);
@@ -2007,34 +2625,7 @@ int main(int argc, char** argv) {
                                   " do_sample=" + std::to_string(cfg.do_sample));
 
         const std::string prompt = apply_chat_template(messages, {}, true, enable_thinking);
-        size_t system_prompt_len = 0;
-        if (!messages.empty() && messages.front().role == "system") {
-            system_prompt_len = messages.front().content.size();
-        }
-        log_event("prompt.build", "id=" + resp_id +
-                                  " prompt_len=" + std::to_string(prompt.size()) +
-                                  " system_prompt_len=" + std::to_string(system_prompt_len) +
-                                  " rag_context_len=" + std::to_string(rag_context.size()) +
-                                  " messages=" + std::to_string(messages.size()));
-        json rag_payload;
-        if (client_rag && body.contains("rag_payload") && body["rag_payload"].is_object()) {
-            rag_payload = body["rag_payload"];
-        } else {
-            size_t doc_count = 0;
-            size_t chunk_count = 0;
-            {
-                std::lock_guard<std::mutex> lock(rag_mutex);
-                doc_count = rag.doc_count();
-                chunk_count = rag.chunk_count();
-            }
-            rag_payload = build_rag_payload(hits,
-                                            rag_enabled && rag_ready,
-                                            rag_top_k,
-                                            doc_count,
-                                            chunk_count,
-                                            rag_trace.empty() ? nullptr : &rag_trace,
-                                            rag_error.empty() ? nullptr : &rag_error);
-        }
+        log_event("prompt.local", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
 
 	        if (stream) {
 	            res.set_header("Content-Type", "text/event-stream");
@@ -2048,7 +2639,15 @@ int main(int argc, char** argv) {
 
 	                    log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
 	                    auto prefill_start = std::chrono::steady_clock::now();
-	                    auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
+                        if (!model) {
+                            json errj = make_error(500, "local model not initialized");
+                            std::string data = "data: " + dump_json_safe(errj) + "\n\n";
+                            sink.write(data.data(), data.size());
+                            const char done[] = "data: [DONE]\n\n";
+                            sink.write(done, sizeof(done) - 1);
+                            return false;
+                        }
+	                    auto ctx = prefill_chunked(*model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
 	                    const size_t prompt_tokens = (!ctx || ctx->kv_cache.empty()) ? 0u : static_cast<size_t>(ctx->kv_cache[0].first.h);
 	                    auto prefill_end = std::chrono::steady_clock::now();
 	                    int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
@@ -2057,7 +2656,7 @@ int main(int argc, char** argv) {
 	                    size_t token_count = 0;
 	                    size_t output_bytes = 0;
 	                    auto gen_start = std::chrono::steady_clock::now();
-	                    model.generate(ctx, cfg, [&](const std::string& token) {
+	                    model->generate(ctx, cfg, [&](const std::string& token) {
 	                        std::string safe_token = sanitize_utf8(token);
 	                        ++token_count;
 	                        output_bytes += safe_token.size();
@@ -2130,7 +2729,12 @@ int main(int argc, char** argv) {
 	            std::lock_guard<std::mutex> lock(model_mutex);
 	            log_event("chat.prefill.start", "id=" + resp_id + " prompt_len=" + std::to_string(prompt.size()));
 	            auto prefill_start = std::chrono::steady_clock::now();
-	            auto ctx = prefill_chunked(model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
+                if (!model) {
+                    res.status = 500;
+                    res.set_content(dump_json_safe(make_error(500, "local model not initialized")), "application/json");
+                    return;
+                }
+	            auto ctx = prefill_chunked(*model, prompt, opt.llm_prefill_chunk_bytes, resp_id);
 	            prompt_tokens = (!ctx || ctx->kv_cache.empty()) ? 0u : static_cast<size_t>(ctx->kv_cache[0].first.h);
 	            auto prefill_end = std::chrono::steady_clock::now();
 	            int64_t prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(prefill_end - prefill_start).count();
@@ -2138,7 +2742,7 @@ int main(int argc, char** argv) {
 
             size_t token_count = 0;
             auto gen_start = std::chrono::steady_clock::now();
-            model.generate(ctx, cfg, [&](const std::string& token) {
+            model->generate(ctx, cfg, [&](const std::string& token) {
                 generated += sanitize_utf8(token);
                 ++token_count;
             });
@@ -2182,7 +2786,7 @@ int main(int argc, char** argv) {
     server.listen("0.0.0.0", opt.port);
 
 #if defined(NCNN_RAG_HAS_VULKAN_API) && NCNN_RAG_HAS_VULKAN_API
-    if (opt.use_vulkan) {
+    if (opt.llm_backend == LlmBackend::Local && use_vulkan_runtime) {
         ncnn::destroy_gpu_instance();
     }
 #endif
